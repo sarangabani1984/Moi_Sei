@@ -22,6 +22,11 @@ def get_connection():
 
 
 def fetch_one(query, parameter):
+    """Run a plain SELECT with one parameter and return the first row as a dict.
+
+    Used for direct table lookups (get_family, get_event, ...). Returns None
+    if no matching row exists.
+    """
     connection = get_connection()
     cursor = connection.cursor()
     cursor.execute(query, parameter)
@@ -33,6 +38,12 @@ def fetch_one(query, parameter):
 
 
 def fetch_procedure_rows(call, *parameters):
+    """Execute a stored procedure call and return every row as a list of dicts.
+
+    `call` is an ODBC call string, e.g. "{CALL dbo.sp_GetMyContributions (?)}".
+    `*parameters` are passed positionally to fill the procedure's `?` placeholders,
+    so this works for procedures with one parameter or several.
+    """
     connection = get_connection()
     cursor = connection.cursor()
     cursor.execute(call, *parameters)
@@ -41,6 +52,12 @@ def fetch_procedure_rows(call, *parameters):
 
 
 def get_family_by_phone(phone_number):
+    """Log a family in by phone number and return their full profile.
+
+    Calls sp_GetFamilyByPhone to resolve the phone number to the family's
+    permanent id, then fetches the complete record via get_family(). Returns
+    None if no active family is registered with that phone number.
+    """
     rows = fetch_procedure_rows(
         "{CALL dbo.sp_GetFamilyByPhone (?)}",
         phone_number,
@@ -52,6 +69,11 @@ def get_family_by_phone(phone_number):
 
 
 def get_my_contributions(user_id):
+    """Return every contribution this family has given, with receiver details.
+
+    Calls sp_GetMyContributions. Each row includes the receiver's full profile
+    and the related event, so the caller never needs a second lookup.
+    """
     return fetch_procedure_rows(
         "{CALL dbo.sp_GetMyContributions (?)}",
         user_id,
@@ -59,6 +81,11 @@ def get_my_contributions(user_id):
 
 
 def get_my_received_contributions(user_id):
+    """Return every amount this family has received, with contributor details.
+
+    Calls sp_GetMyReceivedContributions. Mirror of get_my_contributions: each
+    row includes the contributor's full profile and the related event.
+    """
     return fetch_procedure_rows(
         "{CALL dbo.sp_GetMyReceivedContributions (?)}",
         user_id,
@@ -66,6 +93,12 @@ def get_my_received_contributions(user_id):
 
 
 def get_my_partner_history(user_id):
+    """Return one summary row per family this user has ever exchanged with.
+
+    Calls sp_GetMyPartnerHistory. Each row totals what was given to, and
+    received from, that one counterpart family across every event combined,
+    plus the net difference (positive = this family gave more).
+    """
     return fetch_procedure_rows(
         "{CALL dbo.sp_GetMyPartnerHistory (?)}",
         user_id,
@@ -73,6 +106,11 @@ def get_my_partner_history(user_id):
 
 
 def get_my_partner_transactions(user_id, other_user_id):
+    """Return the full chronological transaction history with one specific family.
+
+    Calls sp_GetMyPartnerTransactions. Each row is one transaction between
+    `user_id` and `other_user_id`, in date order, with a running net balance.
+    """
     return fetch_procedure_rows(
         "{CALL dbo.sp_GetMyPartnerTransactions (?, ?)}",
         user_id,
@@ -81,6 +119,7 @@ def get_my_partner_transactions(user_id, other_user_id):
 
 
 def get_family(user_id):
+    """Fetch one family's full profile by their permanent id, or None if not found."""
     return fetch_one(
         """
         SELECT id, husband_name, wife_name, husband_job, phone_number,
@@ -93,6 +132,7 @@ def get_family(user_id):
 
 
 def get_event(event_id):
+    """Fetch one event's details by its id, or None if not found."""
     return fetch_one(
         """
         SELECT event_id, event_name, event_date, event_place,
@@ -105,6 +145,12 @@ def get_event(event_id):
 
 
 def get_event_with_host(event_id):
+    """Fetch one event's details plus the profile of its locked-in host (receiver).
+
+    `host_user_id` and the joined `host_husband_name`/`host_phone_number` are
+    None if the event has not received its first contribution yet, since the
+    host is only locked in at that point (see sp_ProcessContribution).
+    """
     return fetch_one(
         """
         SELECT e.event_id, e.event_name, e.event_date, e.event_place,
@@ -119,8 +165,18 @@ def get_event_with_host(event_id):
     )
 
 
-
 def create_family(husband_name, wife_name, husband_job, phone_number, place, family_deity, email):
+    """Insert a new family record and return its new permanent id.
+
+    Used by the admin app when a contributor or receiver's phone number isn't
+    registered yet, so staff can add them on the spot without leaving the flow.
+    All fields except husband_name and phone_number are optional (blank string
+    or falsy values are stored as NULL).
+
+    Returns:
+        (True, new_id) on success.
+        (False, error_message) if the insert fails (e.g. duplicate phone number).
+    """
     connection = get_connection()
     cursor = connection.cursor()
     try:
@@ -148,6 +204,16 @@ def create_family(husband_name, wife_name, husband_job, phone_number, place, fam
 
 
 def process_contribution(contributor_id, receiver_id, event_id, amount):
+    """Record one contribution by calling sp_ProcessContribution.
+
+    This is the only function that writes a contribution. All validation
+    (matching families, valid amount, one-host-per-event rule) happens inside
+    the stored procedure, not here.
+
+    Returns:
+        (True, success_message) on success.
+        (False, error_message) if the procedure rejects or fails the request.
+    """
     connection = get_connection()
     cursor = connection.cursor()
     try:
