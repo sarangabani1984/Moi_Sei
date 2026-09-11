@@ -111,6 +111,42 @@ GO
 -- STEP 4: CREATE STORED PROCEDURE FOR ATOMIC CONTRIBUTIONS
 -- ----------------------------------------------------------------------------
 
+-- ============================================================================
+-- sp_ProcessContribution
+-- ----------------------------------------------------------------------------
+-- PURPOSE:
+--   Records one contribution from a contributor family to a receiver family
+--   for a specific event. This is the only way money movement is written to
+--   the database, so every business rule is enforced here in one place.
+--
+-- PARAMETERS:
+--   @ContributorId  Permanent id (users.id) of the family giving the amount.
+--   @ReceiverId     Permanent id (users.id) of the family getting the amount.
+--   @EventId        The event this contribution belongs to (event.event_id).
+--   @Amount         The amount being contributed. Must be greater than zero.
+--
+-- VALIDATION RULES (checked before anything is written):
+--   1. Contributor and Receiver must be two different families.
+--   2. Amount must be a positive number.
+--   3. Contributor must exist and be active (is_active = 1).
+--   4. Receiver must exist and be active (is_active = 1).
+--   5. Event must exist and be active.
+--   6. One event can only ever have ONE receiver (the "host"):
+--        - If the event has no host yet, this contribution's @ReceiverId
+--          becomes the permanent host for that event (locked in below).
+--        - If the event already has a host, @ReceiverId must match it,
+--          otherwise the contribution is rejected.
+--
+-- WHAT IT WRITES (only if all validations pass):
+--   1. One row in `transactions`  -> the parent receipt for this contribution.
+--   2. One row in `journal_entries` with entry_type = 'CONTRIBUTED'
+--      for the contributor (money going out).
+--   3. One row in `journal_entries` with entry_type = 'RECEIVED'
+--      for the receiver (money coming in).
+--   All three writes happen inside one SQL transaction: if anything fails,
+--   everything is rolled back so no half-saved contribution is ever left
+--   behind.
+-- ============================================================================
 CREATE PROCEDURE sp_ProcessContribution
     @ContributorId INT,
     @ReceiverId INT,
@@ -206,7 +242,27 @@ GO
 -- ----------------------------------------------------------------------------
 -- STEP 5: PRIVATE FAMILY REPORT PROCEDURES
 -- ----------------------------------------------------------------------------
+-- Every procedure below only ever returns data that belongs to, or directly
+-- involves, the @UserId that is passed in. No procedure here lets one family
+-- browse another family's private records except through a shared
+-- transaction they were both part of.
 
+-- ============================================================================
+-- sp_GetFamilyByPhone
+-- ----------------------------------------------------------------------------
+-- PURPOSE:
+--   Used for login. Converts a phone number typed by the user into that
+--   family's permanent id (users.id). The phone number can change over time;
+--   the id it resolves to never does, so history is never lost.
+--
+-- PARAMETERS:
+--   @PhoneNumber  The phone number typed on the login screen.
+--
+-- RETURNS:
+--   Zero rows if no active family has that phone number.
+--   One row with (id, husband_name, wife_name, phone_number) if found.
+--   The caller (db.py) then fetches the full profile using that id.
+-- ============================================================================
 -- Login lookup: the phone number maps to the permanent family ID.
 CREATE PROCEDURE sp_GetFamilyByPhone
     @PhoneNumber NVARCHAR(30)
@@ -221,6 +277,33 @@ BEGIN
 END;
 GO
 
+-- ============================================================================
+-- sp_GetMyContributions
+-- ----------------------------------------------------------------------------
+-- PURPOSE:
+--   Answers: "What have I given, and to whom?"
+--   Returns every contribution the logged-in family has made, together with
+--   the full profile of the family that received it and the event it was
+--   for, so the screen never needs a second lookup.
+--
+-- PARAMETERS:
+--   @UserId  Permanent id (users.id) of the logged-in family.
+--
+-- HOW IT WORKS:
+--   Every contribution creates TWO journal_entries rows that share the same
+--   transaction_id: one 'CONTRIBUTED' row (the giver) and one 'RECEIVED' row
+--   (the getter). This procedure starts from the caller's own 'CONTRIBUTED'
+--   rows, then joins back to the matching 'RECEIVED' row on the same
+--   transaction to pull out who the receiver was.
+--
+-- RETURNS (one row per contribution, newest first):
+--   transaction_id, transaction_date,
+--   receiver_id, receiver_husband_name, receiver_wife_name,
+--   receiver_husband_job, receiver_phone_number, receiver_place,
+--   receiver_family_deity, receiver_email,
+--   event_id, event_name, event_date, event_place, event_location,
+--   amount
+-- ============================================================================
 -- Show only the logged-in family's own contributions, including receiver details.
 CREATE PROCEDURE sp_GetMyContributions
     @UserId INT
@@ -258,6 +341,26 @@ BEGIN
 END;
 GO
 
+-- ============================================================================
+-- sp_GetMyReceivedContributions
+-- ----------------------------------------------------------------------------
+-- PURPOSE:
+--   Answers: "What have I received, and from whom?"
+--   The mirror image of sp_GetMyContributions: starts from the caller's own
+--   'RECEIVED' rows and joins back to the matching 'CONTRIBUTED' row on the
+--   same transaction to pull out the full profile of whoever gave the money.
+--
+-- PARAMETERS:
+--   @UserId  Permanent id (users.id) of the logged-in family.
+--
+-- RETURNS (one row per amount received, newest first):
+--   transaction_id, transaction_date,
+--   contributor_id, contributor_husband_name, contributor_wife_name,
+--   contributor_husband_job, contributor_phone_number, contributor_place,
+--   contributor_family_deity, contributor_email,
+--   event_id, event_name, event_date, event_place, event_location,
+--   amount
+-- ============================================================================
 -- Show only what the logged-in family received, including contributor details.
 CREATE PROCEDURE sp_GetMyReceivedContributions
     @UserId INT
@@ -295,6 +398,36 @@ BEGIN
 END;
 GO
 
+-- ============================================================================
+-- sp_GetMyPartnerHistory
+-- ----------------------------------------------------------------------------
+-- PURPOSE:
+--   Answers: "Across every event, family by family, am I ahead or behind?"
+--   The same two families can exchange money more than once, in either
+--   direction, across many different events over time (this is the "Moi Sei"
+--   reciprocity custom: what you give at someone's function, they are
+--   expected to return at yours). This procedure collapses all of that
+--   history into one summary row per counterpart family.
+--
+-- PARAMETERS:
+--   @UserId  Permanent id (users.id) of the logged-in family.
+--
+-- HOW IT WORKS:
+--   1. The tx_pairs CTE pairs up every transaction's 'CONTRIBUTED' row with
+--      its matching 'RECEIVED' row, keeping only transactions where the
+--      caller was on either side (as contributor or as receiver).
+--   2. The outer query groups those pairs by the *other* family involved,
+--      and sums how much the caller gave them vs. received from them.
+--
+-- RETURNS (one row per counterpart family, largest net_difference first):
+--   other_user_id, other_husband_name, other_wife_name, other_phone_number,
+--   total_given       -> everything the caller has given this family
+--   total_received    -> everything the caller has received from this family
+--   net_difference    -> total_given - total_received
+--                        (positive = caller has given more than received;
+--                         negative = caller has received more than given)
+--   transaction_count, last_transaction_date
+-- ============================================================================
 -- Show the running give-and-take history with each family the user has ever
 -- exchanged with, combined across all events (the "Moi Sei" reciprocity view).
 CREATE PROCEDURE sp_GetMyPartnerHistory
@@ -338,6 +471,38 @@ BEGIN
 END;
 GO
 
+-- ============================================================================
+-- sp_GetMyPartnerTransactions
+-- ----------------------------------------------------------------------------
+-- PURPOSE:
+--   Drill-down for sp_GetMyPartnerHistory. Answers: "Show me exactly what
+--   happened between me and this ONE specific family, in the order it
+--   happened, so I can see the back-and-forth (e.g. I paid, then they paid
+--   me back, then I paid again)."
+--
+-- PARAMETERS:
+--   @UserId       Permanent id (users.id) of the logged-in family.
+--   @OtherUserId  Permanent id (users.id) of the one counterpart family to
+--                 show the timeline for (chosen by the user from the
+--                 sp_GetMyPartnerHistory list).
+--
+-- HOW IT WORKS:
+--   1. The tx_pairs CTE finds every transaction that happened directly
+--      between exactly these two families, in either direction.
+--   2. Each row is labelled 'You Paid' or 'You Received' from @UserId's
+--      point of view.
+--   3. A running SUM() window function keeps a rolling net balance across
+--      the rows, ordered by date: it goes up when @UserId paid, and down
+--      when @UserId received, so the sign at each row shows who was ahead
+--      at that point in time.
+--
+-- RETURNS (one row per transaction, oldest first):
+--   transaction_id, transaction_date, event_id, event_name,
+--   direction                 -> 'You Paid' or 'You Received'
+--   amount                    -> this transaction's amount
+--   running_net_difference    -> cumulative balance after this transaction
+--                                (positive = @UserId is ahead so far)
+-- ============================================================================
 -- Show the chronological transaction-by-transaction timeline between the
 -- logged-in family and one specific counterpart, with a running net balance.
 CREATE PROCEDURE sp_GetMyPartnerTransactions
