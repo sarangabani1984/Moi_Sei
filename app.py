@@ -10,6 +10,7 @@ from db import (
     get_family_by_phone,
     process_contribution,
 )
+from notifications import send_contribution_whatsapp
 
 
 def format_family(family):
@@ -224,9 +225,20 @@ if "contributor" in st.session_state:
     checked = st.session_state["checked_details"]
     st.info(f"Amount to record: **{float(amount):.2f}**")
 
+    notify_channel = st.radio(
+        "Send Confirmation Via",
+        ["WhatsApp", "None"],
+        horizontal=True,
+        index=0,
+    )
+
     if checked["contributor_id"] == checked["receiver_id"]:
         st.error("Contributor and receiver must be different families.")
     elif st.button("Submit Contribution", type="primary", use_container_width=True):
+        contributor = st.session_state.get("contributor", {})
+        receiver = st.session_state.get("receiver", {})
+        event_info = st.session_state.get("event", {})
+
         success, message = process_contribution(
             checked["contributor_id"],
             checked["receiver_id"],
@@ -235,6 +247,21 @@ if "contributor" in st.session_state:
         )
         if success:
             st.success(message)
+
+            # Send Notification based on chosen channel
+            if notify_channel == "WhatsApp":
+                wa_sent, wa_msg = send_contribution_whatsapp(
+                    contributor_phone=contributor.get("phone_number", ""),
+                    contributor_name=contributor.get("husband_name", "Contributor"),
+                    amount=float(amount),
+                    event_name=event_info.get("event_name", "Event"),
+                    receiver_name=receiver.get("husband_name", "Host"),
+                )
+                if wa_sent:
+                    st.info(f"💬 {wa_msg}")
+                else:
+                    st.caption(f"ℹ️ WhatsApp Notification: {wa_msg}")
+
             st.session_state.pop("checked_details", None)
             st.session_state.pop("contributor", None)
             st.session_state.pop("receiver", None)

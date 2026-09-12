@@ -40,7 +40,7 @@ CREATE TABLE event (
     event_id INT IDENTITY(101,1) PRIMARY KEY,
     event_name NVARCHAR(200) NOT NULL,
     event_date DATE NOT NULL,
-    event_place NVARCHAR(200) NULL,
+    event_place NVARCHAR(200) NOT NULL,
     event_location NVARCHAR(300) NULL,
     -- The single family authorized to receive contributions for this event.
     -- Locked in by the first contribution processed for the event.
