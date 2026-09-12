@@ -1,5 +1,7 @@
+import json
 import os
 import re
+import urllib.parse
 import streamlit as st
 
 # Check if psycopg2 is available for PostgreSQL (Supabase / Neon)
@@ -27,17 +29,42 @@ def _get_secret_or_env(key: str) -> str:
     return os.getenv(key, "")
 
 
-def _clean_postgres_uri(uri: str) -> str:
-    """Removes literal brackets like [password] if user left them in secrets."""
+def parse_pg_uri(uri: str):
+    """Parses any Postgres URI into explicit kwargs for psycopg2.
+    Handles unencoded @ or [brackets] in password gracefully.
+    """
     if not uri:
-        return ""
-    # Clean up literal brackets around password in postgres URI
-    cleaned = re.sub(r":\[([^\]]+)\]@", r":\1@", uri.strip())
-    cleaned = re.sub(r":%5B([^%]+)%5D@", r":\1@", cleaned)
-    # Fix postgresql:// scheme
-    if cleaned.startswith("postgres://"):
-        cleaned = "postgresql://" + cleaned[11:]
-    return cleaned
+        return None
+    raw = uri.strip()
+    raw = re.sub(r"^(postgres|postgresql)://", "", raw)
+    at_idx = raw.rfind("@")
+    if at_idx == -1:
+        return None
+    user_pass = raw[:at_idx]
+    host_db = raw[at_idx + 1 :]
+
+    if ":" in user_pass:
+        user, pwd = user_pass.split(":", 1)
+    else:
+        user, pwd = user_pass, ""
+
+    pwd = urllib.parse.unquote(re.sub(r"^\[|\]$", "", pwd))
+
+    m_host = re.match(r"^([^/@:]+)(?::(\d+))?/(.+)$", host_db)
+    if not m_host:
+        return None
+    host, port, db = m_host.groups()
+    db = db.split("?")[0]
+
+    return {
+        "user": user,
+        "password": pwd,
+        "host": host,
+        "port": int(port) if port else 5432,
+        "dbname": db,
+        "sslmode": "require",
+        "connect_timeout": 15,
+    }
 
 
 def is_postgres_mode() -> bool:
@@ -49,12 +76,17 @@ def is_postgres_mode() -> bool:
 @st.cache_resource
 def get_connection():
     """Opens a connection to PostgreSQL (if configured) or SQL Server Express."""
-    postgres_uri = _clean_postgres_uri(
-        _get_secret_or_env("MOI_SEI_POSTGRES_URL") or _get_secret_or_env("POSTGRES_URL")
-    )
+    postgres_uri = _get_secret_or_env("MOI_SEI_POSTGRES_URL") or _get_secret_or_env("POSTGRES_URL")
 
     if postgres_uri and PSYCOPG2_AVAILABLE:
-        return psycopg2.connect(postgres_uri)
+        conn_kwargs = parse_pg_uri(postgres_uri)
+        if conn_kwargs:
+            try:
+                return psycopg2.connect(**conn_kwargs)
+            except Exception as exc:
+                # Fallback to direct URI string if parse attempt fails
+                pass
+        return psycopg2.connect(postgres_uri, sslmode="require")
 
     if PYODBC_AVAILABLE:
         server = os.getenv("MOI_SEI_SQL_SERVER", r"JNPR-WIN-MPRZ09\SQLEXPRESS")
