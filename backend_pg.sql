@@ -43,7 +43,6 @@ CREATE TABLE event (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-ALTER SEQUENCE event_event_id_seq RESTART WITH 101;
 
 -- 3. Transactions Table: High-level parent record for each financial event
 CREATE TABLE transactions (
@@ -75,13 +74,15 @@ VALUES
     ('Test Husband 4', 'Test Wife 4', 'Test Occupation 4', '9000000004', 'Test Place 4', 'Test Deity 4', 'family4@example.test'),
     ('Test Husband 5', 'Test Wife 5', 'Test Occupation 5', '9000000005', 'Test Place 5', 'Test Deity 5', 'family5@example.test');
 
-INSERT INTO event (event_name, event_date, event_place, event_location)
+INSERT INTO event (event_id, event_name, event_date, event_place, event_location)
 VALUES
-    ('Test Family Function 2026', '2026-10-10', 'Test Mandapam 1', 'Test Location 1'),
-    ('Test Education Support 2026', '2026-11-15', 'Test Hall 2', 'Test Location 2'),
-    ('Test Medical Help 2026', '2026-12-05', 'Test Community Hall 3', 'Test Location 3'),
-    ('Test Festival Gathering 2027', '2027-01-14', 'Test Temple Hall 4', 'Test Location 4'),
-    ('Test Welfare Meeting 2027', '2027-02-20', 'Test Mandapam 5', 'Test Location 5');
+    (101, 'Test Family Function 2026', '2026-10-10', 'Test Mandapam 1', 'Test Location 1'),
+    (102, 'Test Education Support 2026', '2026-11-15', 'Test Hall 2', 'Test Location 2'),
+    (103, 'Test Medical Help 2026', '2026-12-05', 'Test Community Hall 3', 'Test Location 3'),
+    (104, 'Test Festival Gathering 2027', '2027-01-14', 'Test Temple Hall 4', 'Test Location 4'),
+    (105, 'Test Welfare Meeting 2027', '2027-02-20', 'Test Mandapam 5', 'Test Location 5');
+
+ALTER SEQUENCE event_event_id_seq RESTART WITH 106;
 
 -- ----------------------------------------------------------------------------
 -- STEP 4: FUNCTION FOR ATOMIC CONTRIBUTIONS
