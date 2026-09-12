@@ -38,8 +38,8 @@ st.caption("Record a contribution after checking both families and the event.")
 
 try:
     get_connection()
-except pyodbc.Error as error:
-    st.error("Could not connect to SQL Server.")
+except Exception as error:
+    st.error("Could not connect to database.")
     st.code(str(error))
     st.stop()
 
@@ -52,7 +52,7 @@ with input_col3:
 
 try:
     event_preview = get_event_with_host(int(event_id))
-except pyodbc.Error:
+except Exception:
     event_preview = None
 
 with input_col1:
@@ -133,7 +133,7 @@ if check_button:
                 "event": selected_event,
                 "event_id": int(event_id),
             }
-    except pyodbc.Error as error:
+    except Exception as error:
         st.error("Could not read the requested details.")
         st.code(str(error))
 

@@ -17,8 +17,8 @@ st.caption("View only your family's contribution and received history.")
 
 try:
     get_connection()
-except pyodbc.Error as error:
-    st.error("Could not connect to SQL Server.")
+except Exception as error:
+    st.error("Could not connect to database.")
     st.code(str(error))
     st.stop()
 
@@ -35,7 +35,7 @@ if st.button("View My Records", type="primary", use_container_width=True):
             st.session_state.pop("logged_in_family", None)
         else:
             st.session_state["logged_in_family"] = family
-    except pyodbc.Error as error:
+    except Exception as error:
         st.error("Could not load family records.")
         st.code(str(error))
 
@@ -105,6 +105,6 @@ if "logged_in_family" in st.session_state:
                 st.info("No transactions found with this family.")
         else:
             st.info("No shared history with any family yet.")
-    except pyodbc.Error as error:
+    except Exception as error:
         st.error("Could not load this family's records.")
         st.code(str(error))
