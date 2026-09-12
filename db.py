@@ -303,3 +303,188 @@ def process_contribution(contributor_id, receiver_id, event_id, amount):
     except Exception as error:
         connection.rollback()
         return False, str(error)
+
+
+def get_my_hosted_events(host_user_id):
+    """Fetch all events hosted by a specific family (past & upcoming)."""
+    connection = get_connection()
+    cursor = connection.cursor()
+    if is_postgres_mode():
+        cursor.execute(
+            """
+            SELECT event_id, event_name, event_date, event_place, event_location, is_active
+            FROM event
+            WHERE host_user_id = %s AND is_active = TRUE
+            ORDER BY event_date DESC;
+            """,
+            (host_user_id,),
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT event_id, event_name, event_date, event_place, event_location, is_active
+            FROM dbo.event
+            WHERE host_user_id = ? AND is_active = 1
+            ORDER BY event_date DESC;
+            """,
+            (host_user_id,),
+        )
+    columns = [column[0] for column in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def create_event_by_host(event_name, event_date, event_place, event_location, host_user_id):
+    """Allows a family to schedule/announce an upcoming event where they are the host."""
+    connection = get_connection()
+    cursor = connection.cursor()
+    try:
+        if is_postgres_mode():
+            cursor.execute(
+                """
+                INSERT INTO event (event_name, event_date, event_place, event_location, host_user_id)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING event_id;
+                """,
+                (event_name, event_date, event_place, event_location or None, host_user_id),
+            )
+            new_id = cursor.fetchone()[0]
+        else:
+            cursor.execute(
+                """
+                INSERT INTO dbo.event (event_name, event_date, event_place, event_location, host_user_id)
+                OUTPUT INSERTED.event_id
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                event_name,
+                event_date,
+                event_place,
+                event_location or None,
+                host_user_id,
+            )
+            new_id = cursor.fetchone()[0]
+        connection.commit()
+        return True, new_id
+    except Exception as error:
+        connection.rollback()
+        return False, str(error)
+
+
+def update_event_by_host(event_id, event_name, event_date, event_place, event_location, host_user_id):
+    """Allows a host family to update or reschedule their upcoming event details."""
+    connection = get_connection()
+    cursor = connection.cursor()
+    try:
+        if is_postgres_mode():
+            cursor.execute(
+                """
+                UPDATE event
+                SET event_name = %s, event_date = %s, event_place = %s, event_location = %s, updated_at = NOW()
+                WHERE event_id = %s AND host_user_id = %s AND is_active = TRUE;
+                """,
+                (event_name, event_date, event_place, event_location or None, event_id, host_user_id),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE dbo.event
+                SET event_name = ?, event_date = ?, event_place = ?, event_location = ?, updated_at = SYSDATETIME()
+                WHERE event_id = ? AND host_user_id = ? AND is_active = 1;
+                """,
+                event_name,
+                event_date,
+                event_place,
+                event_location or None,
+                event_id,
+                host_user_id,
+            )
+        connection.commit()
+        return True, "Event updated successfully."
+    except Exception as error:
+        connection.rollback()
+        return False, str(error)
+
+
+def get_upcoming_partner_events(user_id):
+    """Returns upcoming events hosted by other families, along with reciprocity give-and-take totals."""
+    connection = get_connection()
+    cursor = connection.cursor()
+    if is_postgres_mode():
+        cursor.execute(
+            """
+            SELECT 
+                e.event_id,
+                e.event_name,
+                e.event_date,
+                e.event_place,
+                e.event_location,
+                h.id AS host_id,
+                h.husband_name AS host_husband_name,
+                h.wife_name AS host_wife_name,
+                h.phone_number AS host_phone_number,
+                h.place AS host_place,
+                COALESCE((
+                    SELECT SUM(c.amount)
+                    FROM journal_entries c
+                    JOIN journal_entries r ON r.transaction_id = c.transaction_id AND r.entry_type = 'RECEIVED'
+                    WHERE c.entry_type = 'CONTRIBUTED'
+                      AND c.user_id = h.id
+                      AND r.user_id = %s
+                ), 0) AS total_they_paid_you,
+                COALESCE((
+                    SELECT SUM(c.amount)
+                    FROM journal_entries c
+                    JOIN journal_entries r ON r.transaction_id = c.transaction_id AND r.entry_type = 'RECEIVED'
+                    WHERE c.entry_type = 'CONTRIBUTED'
+                      AND c.user_id = %s
+                      AND r.user_id = h.id
+                ), 0) AS total_you_paid_them
+            FROM event e
+            JOIN users h ON h.id = e.host_user_id
+            WHERE e.is_active = TRUE
+              AND e.host_user_id <> %s
+              AND e.event_date >= CURRENT_DATE
+            ORDER BY e.event_date ASC;
+            """,
+            (user_id, user_id, user_id),
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT 
+                e.event_id,
+                e.event_name,
+                e.event_date,
+                e.event_place,
+                e.event_location,
+                h.id AS host_id,
+                h.husband_name AS host_husband_name,
+                h.wife_name AS host_wife_name,
+                h.phone_number AS host_phone_number,
+                h.place AS host_place,
+                COALESCE((
+                    SELECT SUM(c.amount)
+                    FROM journal_entries c
+                    JOIN journal_entries r ON r.transaction_id = c.transaction_id AND r.entry_type = 'RECEIVED'
+                    WHERE c.entry_type = 'CONTRIBUTED'
+                      AND c.user_id = h.id
+                      AND r.user_id = ?
+                ), 0) AS total_they_paid_you,
+                COALESCE((
+                    SELECT SUM(c.amount)
+                    FROM journal_entries c
+                    JOIN journal_entries r ON r.transaction_id = c.transaction_id AND r.entry_type = 'RECEIVED'
+                    WHERE c.entry_type = 'CONTRIBUTED'
+                      AND c.user_id = ?
+                      AND r.user_id = h.id
+                ), 0) AS total_you_paid_them
+            FROM dbo.event e
+            JOIN dbo.users h ON h.id = e.host_user_id
+            WHERE e.is_active = 1
+              AND e.host_user_id <> ?
+              AND e.event_date >= CONVERT(DATE, SYSDATETIME())
+            ORDER BY e.event_date ASC;
+            """,
+            (user_id, user_id, user_id),
+        )
+    columns = [column[0] for column in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]

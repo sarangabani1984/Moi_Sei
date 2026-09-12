@@ -1,13 +1,17 @@
-import pyodbc
+import datetime
 import streamlit as st
 
 from db import (
+    create_event_by_host,
     get_connection,
     get_family_by_phone,
     get_my_contributions,
+    get_my_hosted_events,
     get_my_partner_history,
     get_my_partner_transactions,
     get_my_received_contributions,
+    get_upcoming_partner_events,
+    update_event_by_host,
 )
 
 
@@ -41,70 +45,242 @@ if st.button("View My Records", type="primary", use_container_width=True):
 
 if "logged_in_family" in st.session_state:
     family = st.session_state["logged_in_family"]
-    st.success(f"Signed in as {family['husband_name']} family.")
-    st.write(f"**Family ID:** {family['id']}")
-    st.write(f"**Phone:** {family['phone_number']}")
+    st.success(f"Signed in as **{family['husband_name']}** family.")
+    
+    col_info1, col_info2, col_info3 = st.columns(3)
+    with col_info1:
+        st.write(f"**Family ID:** {family['id']}")
+    with col_info2:
+        st.write(f"**Phone:** {family['phone_number']}")
+    with col_info3:
+        st.write(f"**Place:** {family['place'] or 'Not specified'}")
 
-    try:
-        contribution_rows = get_my_contributions(family["id"])
-        received_rows = get_my_received_contributions(family["id"])
+    st.divider()
 
-        st.subheader("My Contributions")
-        if contribution_rows:
-            st.dataframe(contribution_rows, use_container_width=True, hide_index=True)
-        else:
-            st.info("No contribution records found.")
+    tab_upcoming, tab_my_events, tab_history = st.tabs([
+        "📅 Upcoming Partner Events",
+        "📣 Schedule & Manage My Events",
+        "📊 My Give & Take History",
+    ])
 
-        st.subheader("My Received Contributions")
-        if received_rows:
-            st.dataframe(received_rows, use_container_width=True, hide_index=True)
-        else:
-            st.info("No received contribution records found.")
-
-        st.subheader("Give & Take History (All Events)")
+    # -------------------------------------------------------------------------
+    # TAB 1: Upcoming Events & Reciprocity Preparation Guide
+    # -------------------------------------------------------------------------
+    with tab_upcoming:
+        st.subheader("Upcoming Functions & Reciprocity Preparation")
         st.caption(
-            "For each family you've exchanged with, across every event combined: "
-            "what you've given them, what you've received from them, and the difference."
+            "Plan ahead! Below are upcoming functions with exact give-and-take calculations "
+            "showing how much the host family gave you in the past, how much you gave them, and what to prepare."
         )
-        partner_rows = get_my_partner_history(family["id"])
-        if partner_rows:
-            st.dataframe(
-                partner_rows,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "net_difference": st.column_config.NumberColumn(
-                        "Net Difference (+ = you gave more)",
-                        format="%.2f",
-                    ),
-                },
-            )
+        try:
+            partner_events = get_upcoming_partner_events(family["id"])
+            if partner_events:
+                for evt in partner_events:
+                    they_paid = float(evt.get("total_they_paid_you", 0.0))
+                    you_paid = float(evt.get("total_you_paid_them", 0.0))
+                    net_bal = they_paid - you_paid
 
-            st.markdown("#### Transaction Timeline With One Family")
-            partner_options = {
-                f"{row['other_husband_name']} ({row['other_phone_number']})": row["other_user_id"]
-                for row in partner_rows
-            }
-            selected_label = st.selectbox("Choose a family", list(partner_options.keys()))
-            timeline_rows = get_my_partner_transactions(
-                family["id"], partner_options[selected_label]
+                    with st.expander(
+                        f"📅 {evt['event_date']} — {evt['event_name']} (Host: {evt['host_husband_name']})",
+                        expanded=True,
+                    ):
+                        card_col1, card_col2 = st.columns([1, 1])
+                        with card_col1:
+                            st.markdown(f"### {evt['event_name']}")
+                            st.write(f"**Date:** {evt['event_date']}")
+                            st.write(f"**Venue:** {evt['event_place'] or 'Not specified'}")
+                            st.write(f"**Location:** {evt['event_location'] or 'Not specified'}")
+                            st.write(
+                                f"**Host Family:** {evt['host_husband_name']} "
+                                f"({evt['host_phone_number']}) — {evt['host_place'] or ''}"
+                            )
+
+                        with card_col2:
+                            st.markdown("### Reciprocity Balance")
+                            m_col1, m_col2, m_col3 = st.columns(3)
+                            m_col1.metric("They Paid You", f"₹{they_paid:,.2f}")
+                            m_col2.metric("You Paid Them", f"₹{you_paid:,.2f}")
+                            m_col3.metric("Net Balance", f"₹{net_bal:,.2f}")
+
+                            if they_paid > you_paid:
+                                st.success(
+                                    f"💡 **Preparation Guide:** This host family gave you **₹{they_paid:,.2f}** in past functions. "
+                                    f"You have paid **₹{you_paid:,.2f}**. Prepare at least **₹{net_bal:,.2f}** (or more) "
+                                    f"to match/return reciprocity (*Moi*)!"
+                                )
+                            elif they_paid == you_paid and they_paid > 0:
+                                st.info(
+                                    f"💡 **Preparation Guide:** Both families are even at **₹{they_paid:,.2f}**. "
+                                    f"Prepare **₹{they_paid:,.2f}** (or more) to maintain reciprocity (*Moi*)."
+                                )
+                            elif you_paid > they_paid:
+                                st.warning(
+                                    f"💡 **Preparation Guide:** You have given **₹{you_paid:,.2f}** while host gave **₹{they_paid:,.2f}**. "
+                                    f"You are ahead by **₹{abs(net_bal):,.2f}**. Prepare **₹{they_paid:,.2f}** or an amount of your choice."
+                                )
+                            else:
+                                st.caption(
+                                    "💡 **Preparation Guide:** First function with this host family. Prepare based on family relationship."
+                                )
+            else:
+                st.info("No upcoming functions scheduled by other families yet.")
+        except Exception as error:
+            st.error("Could not load upcoming partner events.")
+            st.code(str(error))
+
+    # -------------------------------------------------------------------------
+    # TAB 2: Schedule & Manage My Hosted Events
+    # -------------------------------------------------------------------------
+    with tab_my_events:
+        st.subheader("Announce / Schedule a New Function")
+        st.caption(
+            "When you schedule a function date here, it will automatically reflect under the "
+            "'Upcoming Partner Events' section for all families who have exchanged contributions with you!"
+        )
+
+        with st.form("schedule_event_form"):
+            form_col1, form_col2 = st.columns(2)
+            with form_col1:
+                new_event_name = st.text_input("Function Name *", placeholder="e.g. Wedding Ceremony / Ear Piercing")
+                new_event_date = st.date_input("Function Date *", min_value=datetime.date.today())
+            with form_col2:
+                new_event_place = st.text_input("Venue / Mandapam *", placeholder="e.g. Sri Raja Mandapam")
+                new_event_location = st.text_input("Location / City", placeholder="e.g. Madurai")
+
+            save_event_button = st.form_submit_button("Announce Function", type="primary")
+
+        if save_event_button:
+            if not new_event_name.strip() or not new_event_place.strip():
+                st.error("Function Name and Venue/Mandapam are required.")
+            else:
+                success, result = create_event_by_host(
+                    event_name=new_event_name.strip(),
+                    event_date=new_event_date.strftime("%Y-%m-%d"),
+                    event_place=new_event_place.strip(),
+                    event_location=new_event_location.strip(),
+                    host_user_id=family["id"],
+                )
+                if success:
+                    st.success(f"🎉 Function announced successfully! Event ID assigned: **{result}**.")
+                    st.rerun()
+                else:
+                    st.error("Could not announce function.")
+                    st.code(result)
+
+        st.divider()
+        st.subheader("My Announced / Hosted Events")
+        try:
+            my_events = get_my_hosted_events(family["id"])
+            if my_events:
+                st.dataframe(my_events, use_container_width=True, hide_index=True)
+
+                st.markdown("#### Update / Reschedule an Existing Event")
+                event_options = {
+                    f"ID {evt['event_id']}: {evt['event_name']} ({evt['event_date']})": evt
+                    for evt in my_events
+                }
+                selected_evt_label = st.selectbox("Select Event to Update", list(event_options.keys()))
+                selected_evt = event_options[selected_evt_label]
+
+                with st.form("update_event_form"):
+                    up_col1, up_col2 = st.columns(2)
+                    with up_col1:
+                        up_event_name = st.text_input("Function Name", value=selected_evt["event_name"])
+                        # Parse date
+                        evt_d = selected_evt["event_date"]
+                        if isinstance(evt_d, str):
+                            evt_d = datetime.datetime.strptime(evt_d, "%Y-%m-%d").date()
+                        up_event_date = st.date_input("Reschedule Date", value=evt_d)
+                    with up_col2:
+                        up_event_place = st.text_input("Venue / Mandapam", value=selected_evt["event_place"] or "")
+                        up_event_location = st.text_input("Location / City", value=selected_evt["event_location"] or "")
+
+                    update_evt_button = st.form_submit_button("Update Event Details", type="secondary")
+
+                if update_evt_button:
+                    up_success, up_msg = update_event_by_host(
+                        event_id=selected_evt["event_id"],
+                        event_name=up_event_name.strip(),
+                        event_date=up_event_date.strftime("%Y-%m-%d"),
+                        event_place=up_event_place.strip(),
+                        event_location=up_event_location.strip(),
+                        host_user_id=family["id"],
+                    )
+                    if up_success:
+                        st.success("Updated event date and details successfully! All partners will see the updated schedule.")
+                        st.rerun()
+                    else:
+                        st.error(up_msg)
+            else:
+                st.info("You haven't scheduled any functions yet.")
+        except Exception as error:
+            st.error("Could not load your hosted events.")
+            st.code(str(error))
+
+    # -------------------------------------------------------------------------
+    # TAB 3: My Give & Take History
+    # -------------------------------------------------------------------------
+    with tab_history:
+        try:
+            contribution_rows = get_my_contributions(family["id"])
+            received_rows = get_my_received_contributions(family["id"])
+
+            st.subheader("My Contributions (Given)")
+            if contribution_rows:
+                st.dataframe(contribution_rows, use_container_width=True, hide_index=True)
+            else:
+                st.info("No contribution records found.")
+
+            st.subheader("My Received Contributions")
+            if received_rows:
+                st.dataframe(received_rows, use_container_width=True, hide_index=True)
+            else:
+                st.info("No received contribution records found.")
+
+            st.subheader("Give & Take Summary (All Events)")
+            st.caption(
+                "For each family you've exchanged with, across every event combined: "
+                "what you've given them, what you've received from them, and the net difference."
             )
-            if timeline_rows:
+            partner_rows = get_my_partner_history(family["id"])
+            if partner_rows:
                 st.dataframe(
-                    timeline_rows,
+                    partner_rows,
                     use_container_width=True,
                     hide_index=True,
                     column_config={
-                        "amount": st.column_config.NumberColumn("Amount", format="%.2f"),
-                        "running_net_difference": st.column_config.NumberColumn(
-                            "Running Net (+ = you're ahead)", format="%.2f"
+                        "net_difference": st.column_config.NumberColumn(
+                            "Net Difference (+ = you gave more)",
+                            format="%.2f",
                         ),
                     },
                 )
+
+                st.markdown("#### Transaction Timeline With One Family")
+                partner_options = {
+                    f"{row['other_husband_name']} ({row['other_phone_number']})": row["other_user_id"]
+                    for row in partner_rows
+                }
+                selected_label = st.selectbox("Choose a family", list(partner_options.keys()))
+                timeline_rows = get_my_partner_transactions(
+                    family["id"], partner_options[selected_label]
+                )
+                if timeline_rows:
+                    st.dataframe(
+                        timeline_rows,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "amount": st.column_config.NumberColumn("Amount", format="%.2f"),
+                            "running_net_difference": st.column_config.NumberColumn(
+                                "Running Net (+ = you're ahead)", format="%.2f"
+                            ),
+                        },
+                    )
+                else:
+                    st.info("No transactions found with this family.")
             else:
-                st.info("No transactions found with this family.")
-        else:
-            st.info("No shared history with any family yet.")
-    except Exception as error:
-        st.error("Could not load this family's records.")
-        st.code(str(error))
+                st.info("No shared history with any family yet.")
+        except Exception as error:
+            st.error("Could not load this family's records.")
+            st.code(str(error))
