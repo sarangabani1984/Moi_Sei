@@ -148,3 +148,222 @@ BEGIN
 
 END;
 $$ LANGUAGE plpgsql;
+
+-- ----------------------------------------------------------------------------
+-- STEP 5: REPORT FUNCTIONS
+-- ----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION sp_GetFamilyByPhone(p_phone_number VARCHAR)
+RETURNS TABLE (
+    id INT,
+    husband_name VARCHAR,
+    wife_name VARCHAR,
+    phone_number VARCHAR
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT u.id, u.husband_name, u.wife_name, u.phone_number
+    FROM users u
+    WHERE u.phone_number = p_phone_number
+      AND u.is_active = TRUE;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION sp_GetMyContributions(p_user_id INT)
+RETURNS TABLE (
+    transaction_id INT,
+    transaction_date DATE,
+    receiver_id INT,
+    receiver_husband_name VARCHAR,
+    receiver_wife_name VARCHAR,
+    receiver_husband_job VARCHAR,
+    receiver_phone_number VARCHAR,
+    receiver_place VARCHAR,
+    receiver_family_deity VARCHAR,
+    receiver_email VARCHAR,
+    event_id INT,
+    event_name VARCHAR,
+    event_date DATE,
+    event_place VARCHAR,
+    event_location VARCHAR,
+    amount DECIMAL(12,2)
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        t.transaction_id,
+        t.transaction_date,
+        receiver.id AS receiver_id,
+        receiver.husband_name AS receiver_husband_name,
+        receiver.wife_name AS receiver_wife_name,
+        receiver.husband_job AS receiver_husband_job,
+        receiver.phone_number AS receiver_phone_number,
+        receiver.place AS receiver_place,
+        receiver.family_deity AS receiver_family_deity,
+        receiver.email AS receiver_email,
+        e.event_id,
+        e.event_name,
+        e.event_date,
+        e.event_place,
+        e.event_location,
+        contributed.amount
+    FROM journal_entries contributed
+    JOIN journal_entries received
+        ON received.transaction_id = contributed.transaction_id
+       AND received.entry_type = 'RECEIVED'
+    JOIN transactions t ON t.transaction_id = contributed.transaction_id
+    JOIN users receiver ON receiver.id = received.user_id
+    JOIN event e ON e.event_id = contributed.event_id
+    WHERE contributed.user_id = p_user_id
+      AND contributed.entry_type = 'CONTRIBUTED'
+    ORDER BY t.transaction_date DESC, t.transaction_id DESC;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION sp_GetMyReceivedContributions(p_user_id INT)
+RETURNS TABLE (
+    transaction_id INT,
+    transaction_date DATE,
+    contributor_id INT,
+    contributor_husband_name VARCHAR,
+    contributor_wife_name VARCHAR,
+    contributor_husband_job VARCHAR,
+    contributor_phone_number VARCHAR,
+    contributor_place VARCHAR,
+    contributor_family_deity VARCHAR,
+    contributor_email VARCHAR,
+    event_id INT,
+    event_name VARCHAR,
+    event_date DATE,
+    event_place VARCHAR,
+    event_location VARCHAR,
+    amount DECIMAL(12,2)
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        t.transaction_id,
+        t.transaction_date,
+        contributor.id AS contributor_id,
+        contributor.husband_name AS contributor_husband_name,
+        contributor.wife_name AS contributor_wife_name,
+        contributor.husband_job AS contributor_husband_job,
+        contributor.phone_number AS contributor_phone_number,
+        contributor.place AS contributor_place,
+        contributor.family_deity AS contributor_family_deity,
+        contributor.email AS contributor_email,
+        e.event_id,
+        e.event_name,
+        e.event_date,
+        e.event_place,
+        e.event_location,
+        contributed.amount
+    FROM journal_entries received
+    JOIN journal_entries contributed
+        ON contributed.transaction_id = received.transaction_id
+       AND contributed.entry_type = 'CONTRIBUTED'
+    JOIN transactions t ON t.transaction_id = received.transaction_id
+    JOIN users contributor ON contributor.id = contributed.user_id
+    JOIN event e ON e.event_id = received.event_id
+    WHERE received.user_id = p_user_id
+      AND received.entry_type = 'RECEIVED'
+    ORDER BY t.transaction_date DESC, t.transaction_id DESC;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION sp_GetMyPartnerHistory(p_user_id INT)
+RETURNS TABLE (
+    other_user_id INT,
+    other_husband_name VARCHAR,
+    other_wife_name VARCHAR,
+    other_phone_number VARCHAR,
+    total_given NUMERIC,
+    total_received NUMERIC,
+    net_difference NUMERIC,
+    transaction_count BIGINT,
+    last_transaction_date DATE
+) AS $$
+BEGIN
+    RETURN QUERY
+    WITH tx_pairs AS (
+        SELECT
+            c.transaction_id,
+            c.user_id AS contributor_id,
+            r.user_id AS receiver_id,
+            c.event_id,
+            c.amount,
+            t.transaction_date
+        FROM journal_entries c
+        JOIN journal_entries r
+            ON r.transaction_id = c.transaction_id
+           AND r.entry_type = 'RECEIVED'
+        JOIN transactions t ON t.transaction_id = c.transaction_id
+        WHERE c.entry_type = 'CONTRIBUTED'
+          AND (c.user_id = p_user_id OR r.user_id = p_user_id)
+    )
+    SELECT
+        other.id AS other_user_id,
+        other.husband_name AS other_husband_name,
+        other.wife_name AS other_wife_name,
+        other.phone_number AS other_phone_number,
+        SUM(CASE WHEN tp.contributor_id = p_user_id THEN tp.amount ELSE 0 END) AS total_given,
+        SUM(CASE WHEN tp.receiver_id = p_user_id THEN tp.amount ELSE 0 END) AS total_received,
+        SUM(CASE WHEN tp.contributor_id = p_user_id THEN tp.amount ELSE 0 END)
+            - SUM(CASE WHEN tp.receiver_id = p_user_id THEN tp.amount ELSE 0 END) AS net_difference,
+        COUNT(*) AS transaction_count,
+        MAX(tp.transaction_date) AS last_transaction_date
+    FROM tx_pairs tp
+    JOIN users other
+        ON other.id = CASE WHEN tp.contributor_id = p_user_id THEN tp.receiver_id ELSE tp.contributor_id END
+    GROUP BY other.id, other.husband_name, other.wife_name, other.phone_number
+    ORDER BY net_difference DESC;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION sp_GetMyPartnerTransactions(p_user_id INT, p_other_user_id INT)
+RETURNS TABLE (
+    transaction_id INT,
+    transaction_date DATE,
+    event_id INT,
+    event_name VARCHAR,
+    direction TEXT,
+    amount DECIMAL(12,2),
+    running_net_difference NUMERIC
+) AS $$
+BEGIN
+    RETURN QUERY
+    WITH tx_pairs AS (
+        SELECT
+            c.transaction_id,
+            t.transaction_date,
+            c.event_id,
+            e.event_name,
+            c.user_id AS contributor_id,
+            r.user_id AS receiver_id,
+            c.amount
+        FROM journal_entries c
+        JOIN journal_entries r
+            ON r.transaction_id = c.transaction_id
+           AND r.entry_type = 'RECEIVED'
+        JOIN transactions t ON t.transaction_id = c.transaction_id
+        JOIN event e ON e.event_id = c.event_id
+        WHERE c.entry_type = 'CONTRIBUTED'
+          AND (
+                (c.user_id = p_user_id AND r.user_id = p_other_user_id)
+             OR (c.user_id = p_other_user_id AND r.user_id = p_user_id)
+          )
+    )
+    SELECT
+        tp.transaction_id,
+        tp.transaction_date,
+        tp.event_id,
+        tp.event_name,
+        CASE WHEN tp.contributor_id = p_user_id THEN 'You Paid' ELSE 'You Received' END AS direction,
+        tp.amount,
+        SUM(CASE WHEN tp.contributor_id = p_user_id THEN tp.amount ELSE -tp.amount END)
+            OVER (ORDER BY tp.transaction_date, tp.transaction_id
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_net_difference
+    FROM tx_pairs tp
+    ORDER BY tp.transaction_date, tp.transaction_id;
+END;
+$$ LANGUAGE plpgsql;
