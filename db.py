@@ -83,10 +83,19 @@ def get_connection():
         if conn_kwargs:
             try:
                 return psycopg2.connect(**conn_kwargs)
-            except Exception as exc:
-                # Fallback to direct URI string if parse attempt fails
-                pass
-        return psycopg2.connect(postgres_uri, sslmode="require")
+            except Exception as exc1:
+                try:
+                    return psycopg2.connect(postgres_uri, sslmode="require")
+                except Exception as exc2:
+                    raise RuntimeError(
+                        f"Failed to connect to PostgreSQL database. Details: {exc1}"
+                    ) from exc1
+        try:
+            return psycopg2.connect(postgres_uri, sslmode="require")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to connect to PostgreSQL database. Details: {exc}"
+            ) from exc
 
     if PYODBC_AVAILABLE:
         server = os.getenv("MOI_SEI_SQL_SERVER", r"JNPR-WIN-MPRZ09\SQLEXPRESS")
