@@ -102,20 +102,36 @@ if "logged_in_family" in st.session_state:
         try:
             partner_events = get_upcoming_partner_events(family["id"])
             if partner_events:
+                upcoming_columns = [
+                    "event_name",
+                    "event_date",
+                    "host_husband_name",
+                    "host_phone_number",
+                    "partner_contributed_to_you",
+                ]
                 st.dataframe(
                     partner_events,
                     use_container_width=True,
                     hide_index=True,
                     column_config={
-                        "event_id": "Event ID",
                         "event_name": "Function Name",
                         "event_date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
-                        "event_place": "Venue / Mandapam",
-                        "event_location": "City / Location",
                         "host_husband_name": "Host Name",
                         "host_phone_number": "Host Mobile",
-                        "host_place": "Host City",
+                        "partner_contributed_to_you": st.column_config.NumberColumn(
+                            "Host Contributed to You",
+                            format="%.2f",
+                        ),
                     },
+                    column_order=upcoming_columns,
+                )
+                total_partner_contributions = sum(
+                    float(row["partner_contributed_to_you"] or 0)
+                    for row in partner_events
+                )
+                st.metric(
+                    "Total Previously Contributed by These Hosts",
+                    f"{total_partner_contributions:,.2f}",
                 )
             else:
                 st.info("No upcoming functions scheduled by your reciprocity partners yet.")

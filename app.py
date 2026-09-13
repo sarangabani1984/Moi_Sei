@@ -117,6 +117,53 @@ if event_preview:
 else:
     st.caption(f"Event ID {int(event_id)} was not found.")
 
+if st.button("Add New Family", type="secondary", use_container_width=True):
+    st.session_state["show_direct_family_form"] = True
+
+if st.session_state.get("show_direct_family_form"):
+    st.divider()
+    st.subheader("Register New Family")
+    st.caption("Use this form to register a family before recording a contribution.")
+
+    with st.form("direct_new_family_form"):
+        direct_col1, direct_col2 = st.columns(2)
+        with direct_col1:
+            direct_husband_name = st.text_input("Husband name *")
+            direct_wife_name = st.text_input("Wife name")
+            direct_husband_job = st.text_input("Husband job")
+            direct_phone = st.text_input("Phone number *")
+        with direct_col2:
+            direct_place = st.text_input("Place")
+            direct_family_deity = st.text_input("Family deity")
+            direct_email = st.text_input("Email")
+            direct_password = st.text_input("Initial portal password *", type="password")
+
+        direct_save_button = st.form_submit_button("Save New Family", type="primary")
+
+    if direct_save_button:
+        if not direct_husband_name.strip() or not direct_phone.strip() or not direct_password:
+            st.error("Husband name, phone number, and portal password are required.")
+        elif len(direct_password) < 6:
+            st.error("Portal password must be at least 6 characters.")
+        else:
+            direct_success, direct_result = create_family(
+                direct_husband_name.strip(),
+                direct_wife_name.strip(),
+                direct_husband_job.strip(),
+                direct_phone.strip(),
+                direct_place.strip(),
+                direct_family_deity.strip(),
+                direct_email.strip(),
+                direct_password,
+            )
+            if direct_success:
+                st.success(f"Family registered successfully. Family ID: {direct_result}")
+                st.session_state.pop("show_direct_family_form", None)
+                st.rerun()
+            else:
+                st.error("Could not register family. The phone number may already exist.")
+                st.code(direct_result)
+
 check_button = st.button("Check Details", type="secondary", use_container_width=True)
 
 if check_button:

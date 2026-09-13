@@ -289,7 +289,7 @@ def create_family(husband_name, wife_name, husband_job, phone_number, place, fam
                 INSERT INTO dbo.users
                     (husband_name, wife_name, husband_job, phone_number, place, family_deity, email, password_hash)
                 OUTPUT INSERTED.id
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 husband_name,
                 wife_name or None,
@@ -472,7 +472,17 @@ def get_upcoming_partner_events(user_id):
                 h.husband_name AS host_husband_name,
                 h.wife_name AS host_wife_name,
                 h.phone_number AS host_phone_number,
-                h.place AS host_place
+                h.place AS host_place,
+                COALESCE((
+                    SELECT SUM(incoming.amount)
+                    FROM journal_entries incoming
+                    JOIN journal_entries outgoing
+                        ON outgoing.transaction_id = incoming.transaction_id
+                       AND outgoing.entry_type = 'CONTRIBUTED'
+                    WHERE incoming.entry_type = 'RECEIVED'
+                      AND incoming.user_id = %s
+                      AND outgoing.user_id = e.host_user_id
+                ), 0) AS partner_contributed_to_you
             FROM event e
             JOIN users h ON h.id = e.host_user_id
             JOIN partner_ids p ON p.partner_id = e.host_user_id
@@ -480,7 +490,7 @@ def get_upcoming_partner_events(user_id):
               AND e.event_date >= CURRENT_DATE
             ORDER BY e.event_date ASC;
             """,
-            (user_id, user_id, user_id),
+            (user_id, user_id, user_id, user_id),
         )
     else:
         cursor.execute(
@@ -502,7 +512,17 @@ def get_upcoming_partner_events(user_id):
                 h.husband_name AS host_husband_name,
                 h.wife_name AS host_wife_name,
                 h.phone_number AS host_phone_number,
-                h.place AS host_place
+                h.place AS host_place,
+                ISNULL((
+                    SELECT SUM(incoming.amount)
+                    FROM journal_entries incoming
+                    JOIN journal_entries outgoing
+                        ON outgoing.transaction_id = incoming.transaction_id
+                       AND outgoing.entry_type = 'CONTRIBUTED'
+                    WHERE incoming.entry_type = 'RECEIVED'
+                      AND incoming.user_id = ?
+                      AND outgoing.user_id = e.host_user_id
+                ), 0) AS partner_contributed_to_you
             FROM dbo.event e
             JOIN dbo.users h ON h.id = e.host_user_id
             JOIN partner_ids p ON p.partner_id = e.host_user_id
@@ -510,7 +530,7 @@ def get_upcoming_partner_events(user_id):
               AND e.event_date >= CONVERT(DATE, SYSDATETIME())
             ORDER BY e.event_date ASC;
             """,
-            (user_id, user_id, user_id),
+            (user_id, user_id, user_id, user_id),
         )
     columns = [column[0] for column in cursor.description]
     return [dict(zip(columns, row)) for row in cursor.fetchall()]

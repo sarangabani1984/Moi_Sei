@@ -186,11 +186,20 @@ BEGIN
 
     -- Validation 4: One event can have only one receiver (the host).
     DECLARE @HostUserId INT;
-    SELECT @HostUserId = host_user_id FROM event WHERE event_id = @EventId AND is_active = 1;
+    DECLARE @EventDate DATE;
+    SELECT @HostUserId = host_user_id, @EventDate = event_date
+    FROM event WHERE event_id = @EventId AND is_active = 1;
 
     IF @HostUserId IS NULL AND NOT EXISTS (SELECT 1 FROM event WHERE event_id = @EventId AND is_active = 1)
     BEGIN
         RAISERROR('Event ID does not exist or is inactive.', 16, 1);
+        RETURN;
+    END
+
+    -- Validation 5: A contribution cannot be dated before its event.
+    IF CONVERT(DATE, SYSDATETIME()) < @EventDate
+    BEGIN
+        RAISERROR('Contribution date cannot be before the event date.', 16, 1);
         RETURN;
     END
 

@@ -98,6 +98,7 @@ CREATE OR REPLACE FUNCTION sp_ProcessContribution(
 RETURNS VOID AS $$
 DECLARE
     v_host_user_id INT;
+    v_event_date DATE;
     v_new_tx_id INT;
 BEGIN
     -- Validation 1: Prevent self-transfers
@@ -120,10 +121,16 @@ BEGIN
     END IF;
 
     -- Validation 4: One event can have only one receiver (the host).
-    SELECT host_user_id INTO v_host_user_id FROM event WHERE event_id = p_event_id AND is_active = TRUE;
+    SELECT host_user_id, event_date INTO v_host_user_id, v_event_date
+    FROM event WHERE event_id = p_event_id AND is_active = TRUE;
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Event ID does not exist or is inactive.';
+    END IF;
+
+    -- Validation 5: A contribution cannot be dated before its event.
+    IF CURRENT_DATE < v_event_date THEN
+        RAISE EXCEPTION 'Contribution date cannot be before the event date.';
     END IF;
 
     IF v_host_user_id IS NOT NULL AND v_host_user_id <> p_receiver_id THEN
