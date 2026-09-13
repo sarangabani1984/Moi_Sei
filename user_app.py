@@ -105,6 +105,7 @@ if "logged_in_family" in st.session_state:
                 upcoming_columns = [
                     "event_name",
                     "event_date",
+                    "event_location",
                     "host_husband_name",
                     "host_phone_number",
                     "partner_contributed_to_you",
@@ -116,6 +117,7 @@ if "logged_in_family" in st.session_state:
                     column_config={
                         "event_name": "Function Name",
                         "event_date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
+                        "event_location": "Location",
                         "host_husband_name": "Host Name",
                         "host_phone_number": "Host Mobile",
                         "partner_contributed_to_you": st.column_config.NumberColumn(
