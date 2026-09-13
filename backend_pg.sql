@@ -26,6 +26,7 @@ CREATE TABLE users (
     place VARCHAR(150) NULL,
     family_deity VARCHAR(150) NULL,
     email VARCHAR(254) NULL,
+    password_hash VARCHAR(255) NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     is_active BOOLEAN NOT NULL DEFAULT TRUE

@@ -11,7 +11,9 @@ from db import (
     get_my_partner_transactions,
     get_my_received_contributions,
     get_upcoming_partner_events,
+    set_family_password,
     update_event_by_host,
+    verify_password,
 )
 
 
@@ -26,22 +28,47 @@ except Exception as error:
     st.code(str(error))
     st.stop()
 
-phone_number = st.text_input(
-    "Registered phone number",
-    placeholder="9000000001",
-)
+phone_number = st.text_input("Registered phone number", placeholder="9000000001")
+portal_password = st.text_input("Portal password", type="password")
 
-if st.button("View My Records", type="primary", use_container_width=True):
+if st.button("Sign In", type="primary", use_container_width=True):
     try:
         family = get_family_by_phone(phone_number.strip())
         if family is None:
             st.error("No active family was found for that phone number.")
             st.session_state.pop("logged_in_family", None)
+        elif not portal_password:
+            st.error("Enter your portal password.")
+        elif not family.get("password_hash"):
+            st.session_state["password_setup_family"] = family
+            st.info("This family does not have a portal password yet. Create one below.")
+        elif not verify_password(portal_password, family["password_hash"]):
+            st.error("Incorrect phone number or password.")
         else:
             st.session_state["logged_in_family"] = family
     except Exception as error:
         st.error("Could not load family records.")
         st.code(str(error))
+
+if "password_setup_family" in st.session_state:
+    setup_family = st.session_state["password_setup_family"]
+    st.subheader("Create Your Portal Password")
+    with st.form("password_setup_form"):
+        first_password = st.text_input("New password", type="password")
+        confirm_password = st.text_input("Confirm password", type="password")
+        setup_button = st.form_submit_button("Create Password", type="primary")
+    if setup_button:
+        if len(first_password) < 6:
+            st.error("Password must be at least 6 characters.")
+        elif first_password != confirm_password:
+            st.error("Passwords do not match.")
+        else:
+            setup_success, setup_message = set_family_password(setup_family["id"], first_password)
+            if setup_success:
+                st.session_state.pop("password_setup_family", None)
+                st.success("Password created. Click Sign In to continue.")
+            else:
+                st.error(setup_message)
 
 if "logged_in_family" in st.session_state:
     family = st.session_state["logged_in_family"]
@@ -64,66 +91,34 @@ if "logged_in_family" in st.session_state:
     ])
 
     # -------------------------------------------------------------------------
-    # TAB 1: Upcoming Events & Reciprocity Preparation Guide
+    # TAB 1: Upcoming Events from Reciprocity Partners
     # -------------------------------------------------------------------------
     with tab_upcoming:
-        st.subheader("Upcoming Functions & Reciprocity Preparation")
+        st.subheader("Upcoming Functions from Your Partners")
         st.caption(
-            "Plan ahead! Below are upcoming functions with exact give-and-take calculations "
-            "showing how much the host family gave you in the past, how much you gave them, and what to prepare."
+            "These upcoming functions belong to families you have exchanged contributions with. "
+            "Plan in advance to attend and return your reciprocity contribution (*Moi*)!"
         )
         try:
             partner_events = get_upcoming_partner_events(family["id"])
             if partner_events:
-                for evt in partner_events:
-                    they_paid = float(evt.get("total_they_paid_you", 0.0))
-                    you_paid = float(evt.get("total_you_paid_them", 0.0))
-                    net_bal = they_paid - you_paid
-
-                    with st.expander(
-                        f"📅 {evt['event_date']} — {evt['event_name']} (Host: {evt['host_husband_name']})",
-                        expanded=True,
-                    ):
-                        card_col1, card_col2 = st.columns([1, 1])
-                        with card_col1:
-                            st.markdown(f"### {evt['event_name']}")
-                            st.write(f"**Date:** {evt['event_date']}")
-                            st.write(f"**Venue:** {evt['event_place'] or 'Not specified'}")
-                            st.write(f"**Location:** {evt['event_location'] or 'Not specified'}")
-                            st.write(
-                                f"**Host Family:** {evt['host_husband_name']} "
-                                f"({evt['host_phone_number']}) — {evt['host_place'] or ''}"
-                            )
-
-                        with card_col2:
-                            st.markdown("### Reciprocity Balance")
-                            m_col1, m_col2, m_col3 = st.columns(3)
-                            m_col1.metric("They Paid You", f"₹{they_paid:,.2f}")
-                            m_col2.metric("You Paid Them", f"₹{you_paid:,.2f}")
-                            m_col3.metric("Net Balance", f"₹{net_bal:,.2f}")
-
-                            if they_paid > you_paid:
-                                st.success(
-                                    f"💡 **Preparation Guide:** This host family gave you **₹{they_paid:,.2f}** in past functions. "
-                                    f"You have paid **₹{you_paid:,.2f}**. Prepare at least **₹{net_bal:,.2f}** (or more) "
-                                    f"to match/return reciprocity (*Moi*)!"
-                                )
-                            elif they_paid == you_paid and they_paid > 0:
-                                st.info(
-                                    f"💡 **Preparation Guide:** Both families are even at **₹{they_paid:,.2f}**. "
-                                    f"Prepare **₹{they_paid:,.2f}** (or more) to maintain reciprocity (*Moi*)."
-                                )
-                            elif you_paid > they_paid:
-                                st.warning(
-                                    f"💡 **Preparation Guide:** You have given **₹{you_paid:,.2f}** while host gave **₹{they_paid:,.2f}**. "
-                                    f"You are ahead by **₹{abs(net_bal):,.2f}**. Prepare **₹{they_paid:,.2f}** or an amount of your choice."
-                                )
-                            else:
-                                st.caption(
-                                    "💡 **Preparation Guide:** First function with this host family. Prepare based on family relationship."
-                                )
+                st.dataframe(
+                    partner_events,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "event_id": "Event ID",
+                        "event_name": "Function Name",
+                        "event_date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
+                        "event_place": "Venue / Mandapam",
+                        "event_location": "City / Location",
+                        "host_husband_name": "Host Name",
+                        "host_phone_number": "Host Mobile",
+                        "host_place": "Host City",
+                    },
+                )
             else:
-                st.info("No upcoming functions scheduled by other families yet.")
+                st.info("No upcoming functions scheduled by your reciprocity partners yet.")
         except Exception as error:
             st.error("Could not load upcoming partner events.")
             st.code(str(error))

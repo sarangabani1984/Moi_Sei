@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import re
 import urllib.parse
@@ -27,6 +28,27 @@ def _get_secret_or_env(key: str) -> str:
     except Exception:
         pass
     return os.getenv(key, "")
+
+
+def hash_password(password: str) -> str:
+    """Create a salted PBKDF2 password hash; only this hash is stored."""
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 200_000)
+    return f"pbkdf2_sha256$200000${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """Verify a password against a stored PBKDF2 hash."""
+    try:
+        algorithm, iterations, salt_hex, digest_hex = stored_hash.split("$")
+        if algorithm != "pbkdf2_sha256":
+            return False
+        candidate = hashlib.pbkdf2_hmac(
+            "sha256", password.encode(), bytes.fromhex(salt_hex), int(iterations)
+        )
+        return candidate.hex() == digest_hex
+    except (AttributeError, ValueError):
+        return False
 
 
 def parse_pg_uri(uri: str):
@@ -178,14 +200,14 @@ def get_my_partner_transactions(user_id, other_user_id):
 def get_family(user_id):
     """Fetch one family's full profile by their permanent id, or None if not found."""
     sql_mssql = """
-        SELECT id, husband_name, wife_name, husband_job, phone_number,
-               place, family_deity, email, is_active
+         SELECT id, husband_name, wife_name, husband_job, phone_number,
+             place, family_deity, email, password_hash, is_active
         FROM dbo.users
         WHERE id = ?
     """
     sql_pg = """
-        SELECT id, husband_name, wife_name, husband_job, phone_number,
-               place, family_deity, email, is_active
+         SELECT id, husband_name, wife_name, husband_job, phone_number,
+             place, family_deity, email, password_hash, is_active
         FROM users
         WHERE id = %s
     """
@@ -232,7 +254,7 @@ def get_event_with_host(event_id):
     return fetch_one(sql_mssql, sql_pg, event_id)
 
 
-def create_family(husband_name, wife_name, husband_job, phone_number, place, family_deity, email):
+def create_family(husband_name, wife_name, husband_job, phone_number, place, family_deity, email, password):
     """Insert a new family record and return its new permanent id."""
     connection = get_connection()
     cursor = connection.cursor()
@@ -241,8 +263,8 @@ def create_family(husband_name, wife_name, husband_job, phone_number, place, fam
             cursor.execute(
                 """
                 INSERT INTO users
-                    (husband_name, wife_name, husband_job, phone_number, place, family_deity, email)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    (husband_name, wife_name, husband_job, phone_number, place, family_deity, email, password_hash)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id;
                 """,
                 (
@@ -253,6 +275,7 @@ def create_family(husband_name, wife_name, husband_job, phone_number, place, fam
                     place or None,
                     family_deity or None,
                     email or None,
+                    hash_password(password),
                 ),
             )
             new_id = cursor.fetchone()[0]
@@ -260,7 +283,7 @@ def create_family(husband_name, wife_name, husband_job, phone_number, place, fam
             cursor.execute(
                 """
                 INSERT INTO dbo.users
-                    (husband_name, wife_name, husband_job, phone_number, place, family_deity, email)
+                    (husband_name, wife_name, husband_job, phone_number, place, family_deity, email, password_hash)
                 OUTPUT INSERTED.id
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
@@ -271,10 +294,27 @@ def create_family(husband_name, wife_name, husband_job, phone_number, place, fam
                 place or None,
                 family_deity or None,
                 email or None,
+                hash_password(password),
             )
             new_id = cursor.fetchone()[0]
         connection.commit()
         return True, new_id
+    except Exception as error:
+        connection.rollback()
+        return False, str(error)
+
+
+def set_family_password(user_id, password):
+    """Set a password for an existing family that has no password yet."""
+    connection = get_connection()
+    cursor = connection.cursor()
+    try:
+        if is_postgres_mode():
+            cursor.execute("UPDATE users SET password_hash = %s WHERE id = %s", (hash_password(password), user_id))
+        else:
+            cursor.execute("UPDATE dbo.users SET password_hash = ? WHERE id = ?", hash_password(password), user_id)
+        connection.commit()
+        return True, "Password created successfully."
     except Exception as error:
         connection.rollback()
         return False, str(error)
@@ -405,12 +445,19 @@ def update_event_by_host(event_id, event_name, event_date, event_place, event_lo
 
 
 def get_upcoming_partner_events(user_id):
-    """Returns upcoming events hosted by other families, along with reciprocity give-and-take totals."""
+    """Returns upcoming events hosted by families with whom `user_id` has exchanged contributions."""
     connection = get_connection()
     cursor = connection.cursor()
     if is_postgres_mode():
         cursor.execute(
             """
+            WITH partner_ids AS (
+                SELECT DISTINCT 
+                    CASE WHEN c.user_id = %s THEN r.user_id ELSE c.user_id END AS partner_id
+                FROM journal_entries c
+                JOIN journal_entries r ON r.transaction_id = c.transaction_id AND r.entry_type = 'RECEIVED'
+                WHERE c.entry_type = 'CONTRIBUTED' AND (c.user_id = %s OR r.user_id = %s)
+            )
             SELECT 
                 e.event_id,
                 e.event_name,
@@ -421,27 +468,11 @@ def get_upcoming_partner_events(user_id):
                 h.husband_name AS host_husband_name,
                 h.wife_name AS host_wife_name,
                 h.phone_number AS host_phone_number,
-                h.place AS host_place,
-                COALESCE((
-                    SELECT SUM(c.amount)
-                    FROM journal_entries c
-                    JOIN journal_entries r ON r.transaction_id = c.transaction_id AND r.entry_type = 'RECEIVED'
-                    WHERE c.entry_type = 'CONTRIBUTED'
-                      AND c.user_id = h.id
-                      AND r.user_id = %s
-                ), 0) AS total_they_paid_you,
-                COALESCE((
-                    SELECT SUM(c.amount)
-                    FROM journal_entries c
-                    JOIN journal_entries r ON r.transaction_id = c.transaction_id AND r.entry_type = 'RECEIVED'
-                    WHERE c.entry_type = 'CONTRIBUTED'
-                      AND c.user_id = %s
-                      AND r.user_id = h.id
-                ), 0) AS total_you_paid_them
+                h.place AS host_place
             FROM event e
             JOIN users h ON h.id = e.host_user_id
+            JOIN partner_ids p ON p.partner_id = e.host_user_id
             WHERE e.is_active = TRUE
-              AND e.host_user_id <> %s
               AND e.event_date >= CURRENT_DATE
             ORDER BY e.event_date ASC;
             """,
@@ -450,6 +481,13 @@ def get_upcoming_partner_events(user_id):
     else:
         cursor.execute(
             """
+            WITH partner_ids AS (
+                SELECT DISTINCT 
+                    CASE WHEN c.user_id = ? THEN r.user_id ELSE c.user_id END AS partner_id
+                FROM journal_entries c
+                JOIN journal_entries r ON r.transaction_id = c.transaction_id AND r.entry_type = 'RECEIVED'
+                WHERE c.entry_type = 'CONTRIBUTED' AND (c.user_id = ? OR r.user_id = ?)
+            )
             SELECT 
                 e.event_id,
                 e.event_name,
@@ -460,27 +498,11 @@ def get_upcoming_partner_events(user_id):
                 h.husband_name AS host_husband_name,
                 h.wife_name AS host_wife_name,
                 h.phone_number AS host_phone_number,
-                h.place AS host_place,
-                COALESCE((
-                    SELECT SUM(c.amount)
-                    FROM journal_entries c
-                    JOIN journal_entries r ON r.transaction_id = c.transaction_id AND r.entry_type = 'RECEIVED'
-                    WHERE c.entry_type = 'CONTRIBUTED'
-                      AND c.user_id = h.id
-                      AND r.user_id = ?
-                ), 0) AS total_they_paid_you,
-                COALESCE((
-                    SELECT SUM(c.amount)
-                    FROM journal_entries c
-                    JOIN journal_entries r ON r.transaction_id = c.transaction_id AND r.entry_type = 'RECEIVED'
-                    WHERE c.entry_type = 'CONTRIBUTED'
-                      AND c.user_id = ?
-                      AND r.user_id = h.id
-                ), 0) AS total_you_paid_them
+                h.place AS host_place
             FROM dbo.event e
             JOIN dbo.users h ON h.id = e.host_user_id
+            JOIN partner_ids p ON p.partner_id = e.host_user_id
             WHERE e.is_active = 1
-              AND e.host_user_id <> ?
               AND e.event_date >= CONVERT(DATE, SYSDATETIME())
             ORDER BY e.event_date ASC;
             """,

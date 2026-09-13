@@ -1,5 +1,6 @@
 import pyodbc
 import streamlit as st
+import os
 
 from db import (
     create_family,
@@ -11,6 +12,40 @@ from db import (
     process_contribution,
 )
 from notifications import send_contribution_whatsapp
+
+
+def get_admin_password():
+    """Read the admin password from Streamlit Secrets or environment variables."""
+    try:
+        if "MOI_SEI_ADMIN_PASSWORD" in st.secrets:
+            return str(st.secrets["MOI_SEI_ADMIN_PASSWORD"])
+    except Exception:
+        pass
+    return os.getenv("MOI_SEI_ADMIN_PASSWORD", "")
+
+
+def require_admin_login():
+    """Stop the admin app until the configured password is entered correctly."""
+    expected_password = get_admin_password()
+    if not expected_password:
+        st.error("Admin password is not configured. Add MOI_SEI_ADMIN_PASSWORD to app secrets.")
+        st.stop()
+
+    if st.session_state.get("admin_authenticated"):
+        if st.sidebar.button("Log out"):
+            st.session_state.pop("admin_authenticated", None)
+            st.rerun()
+        return
+
+    st.subheader("Admin Sign In")
+    entered_password = st.text_input("Admin password", type="password")
+    if st.button("Sign In", type="primary"):
+        if entered_password == expected_password:
+            st.session_state["admin_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect admin password.")
+    st.stop()
 
 
 def format_family(family):
@@ -35,6 +70,7 @@ def format_event(event):
 st.set_page_config(page_title="Moi Sei", page_icon="M", layout="wide")
 st.title("Moi Sei")
 st.caption("Record a contribution after checking both families and the event.")
+require_admin_login()
 
 try:
     get_connection()
@@ -158,12 +194,15 @@ if "new_family_context" in st.session_state:
             new_place = st.text_input("Place")
             new_family_deity = st.text_input("Family deity")
             new_email = st.text_input("Email")
+            new_password = st.text_input("Initial portal password *", type="password")
 
         create_button = st.form_submit_button("Save Family and Continue", type="primary")
 
     if create_button:
-        if not new_husband_name.strip():
-            st.error("Husband name is required.")
+        if not new_husband_name.strip() or not new_password:
+            st.error("Husband name and an initial portal password are required.")
+        elif len(new_password) < 6:
+            st.error("Portal password must be at least 6 characters.")
         else:
             success, result = create_family(
                 new_husband_name.strip(),
@@ -173,6 +212,7 @@ if "new_family_context" in st.session_state:
                 new_place.strip(),
                 new_family_deity.strip(),
                 new_email.strip(),
+                new_password,
             )
             if success:
                 new_family = get_family(result)
