@@ -104,10 +104,14 @@ def get_connection():
         conn_kwargs = parse_pg_uri(postgres_uri)
         if conn_kwargs:
             try:
-                return psycopg2.connect(**conn_kwargs)
+                connection = psycopg2.connect(**conn_kwargs)
+                connection.autocommit = True
+                return connection
             except Exception as exc1:
                 try:
-                    return psycopg2.connect(postgres_uri, sslmode="require")
+                    connection = psycopg2.connect(postgres_uri, sslmode="require")
+                    connection.autocommit = True
+                    return connection
                 except Exception as exc2:
                     raise RuntimeError(
                         f"Failed to connect to PostgreSQL database. Details: {exc1}"
