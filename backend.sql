@@ -29,6 +29,7 @@ CREATE TABLE users (
     place NVARCHAR(150) NULL,
     family_deity NVARCHAR(150) NULL,
     email NVARCHAR(254) NULL,
+    search_alias NVARCHAR(200) NULL,
     password_hash NVARCHAR(255) NULL,
     created_at DATETIME2 NOT NULL CONSTRAINT DF_users_created_at DEFAULT (SYSDATETIME()),
     updated_at DATETIME2 NOT NULL CONSTRAINT DF_users_updated_at DEFAULT (SYSDATETIME()),

@@ -1,21 +1,25 @@
-import pyodbc
-import streamlit as st
 import os
+import json
+import urllib.parse
+import urllib.request
+
+import streamlit as st
 
 from db import (
     create_family,
+    change_event_receiver,
+    get_active_events,
+    get_active_families_for_search,
     get_connection,
-    get_event,
-    get_event_with_host,
     get_family,
-    get_family_by_phone,
     process_contribution,
+    search_families,
+    set_family_password,
 )
-from notifications import send_contribution_whatsapp
 
 
 def get_admin_password():
-    """Read the admin password from Streamlit Secrets or environment variables."""
+    """Read the staff password from Streamlit Secrets or an environment variable."""
     try:
         if "MOI_SEI_ADMIN_PASSWORD" in st.secrets:
             return str(st.secrets["MOI_SEI_ADMIN_PASSWORD"])
@@ -25,7 +29,7 @@ def get_admin_password():
 
 
 def require_admin_login():
-    """Stop the admin app until the configured password is entered correctly."""
+    """Block this staff page until the configured password is entered."""
     expected_password = get_admin_password()
     if not expected_password:
         st.error("Admin password is not configured. Add MOI_SEI_ADMIN_PASSWORD to app secrets.")
@@ -37,39 +41,135 @@ def require_admin_login():
             st.rerun()
         return
 
-    st.subheader("Admin Sign In")
+    st.subheader("Staff Sign In")
     entered_password = st.text_input("Admin password", type="password")
     if st.button("Sign In", type="primary"):
         if entered_password == expected_password:
             st.session_state["admin_authenticated"] = True
             st.rerun()
-        else:
-            st.error("Incorrect admin password.")
+        st.error("Incorrect admin password.")
     st.stop()
 
 
-def format_family(family):
-    st.markdown(f"**Family ID:** {family['id']}")
-    st.write(f"**Husband:** {family['husband_name']}")
-    st.write(f"**Wife:** {family['wife_name'] or 'Not provided'}")
-    st.write(f"**Job:** {family['husband_job'] or 'Not provided'}")
-    st.write(f"**Phone:** {family['phone_number']}")
-    st.write(f"**Place:** {family['place'] or 'Not provided'}")
-    st.write(f"**Family deity:** {family['family_deity'] or 'Not provided'}")
-    st.write(f"**Email:** {family['email'] or 'Not provided'}")
+def set_family_form_values(family):
+    """Put a selected family's stored details into the editable form fields."""
+    # Reset every widget first so blank values from this family do not retain a prior family's data.
+    for key in (
+        "family_husband_name",
+        "family_wife_name",
+        "family_husband_job",
+        "family_phone_number",
+        "family_place",
+        "family_deity",
+        "family_email",
+        "family_search_alias",
+        "family_password",
+    ):
+        st.session_state[key] = ""
+
+    st.session_state["family_id"] = family["id"]
+    st.session_state["family_husband_name"] = family["husband_name"] or ""
+    st.session_state["family_wife_name"] = family["wife_name"] or ""
+    st.session_state["family_husband_job"] = family["husband_job"] or ""
+    st.session_state["family_phone_number"] = family["phone_number"] or ""
+    st.session_state["family_place"] = family["place"] or ""
+    st.session_state["family_deity"] = family["family_deity"] or ""
+    st.session_state["family_email"] = family["email"] or ""
+    st.session_state["family_search_alias"] = family.get("search_alias") or ""
+    st.session_state["family_password"] = ""
 
 
-def format_event(event):
-    st.markdown(f"**Event ID:** {event['event_id']}")
-    st.write(f"**Name:** {event['event_name']}")
-    st.write(f"**Date:** {event['event_date']}")
-    st.write(f"**Place:** {event['event_place'] or 'Not provided'}")
-    st.write(f"**Location:** {event['event_location'] or 'Not provided'}")
+def clear_family_form():
+    """Clear form values so staff can register a new family."""
+    st.session_state["family_id"] = None
+    st.session_state.pop("family_to_load", None)
+    for key in (
+        "family_husband_name",
+        "family_wife_name",
+        "family_husband_job",
+        "family_phone_number",
+        "family_place",
+        "family_deity",
+        "family_email",
+        "family_search_alias",
+        "family_password",
+    ):
+        st.session_state[key] = ""
 
 
-st.set_page_config(page_title="Moi Sei", page_icon="M", layout="wide")
+def parse_family_details(pasted_text):
+    """Parse labeled lines or one-value-per-line details without changing widgets yet."""
+    aliases = {
+        "husband": "family_husband_name",
+        "husband name": "family_husband_name",
+        "wife": "family_wife_name",
+        "wife name": "family_wife_name",
+        "job": "family_husband_job",
+        "husband job": "family_husband_job",
+        "phone": "family_phone_number",
+        "phone number": "family_phone_number",
+        "mobile": "family_phone_number",
+        "place": "family_place",
+        "location": "family_place",
+        "deity": "family_deity",
+        "family deity": "family_deity",
+        "email": "family_email",
+        "alias": "family_search_alias",
+        "search alias": "family_search_alias",
+        "password": "family_password",
+    }
+    parsed_details = {}
+    unlabeled_values = []
+    for line in pasted_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if ":" not in line:
+            unlabeled_values.append(line)
+            continue
+        label, value = line.split(":", 1)
+        field_name = aliases.get(label.strip().lower())
+        if field_name and value.strip():
+            parsed_details[field_name] = value.strip()
+
+    # Fast-entry order: Phone, Husband, Wife, Place, Job, Deity, Email, Alias, Password.
+    positional_fields = (
+        "family_phone_number",
+        "family_husband_name",
+        "family_wife_name",
+        "family_place",
+        "family_husband_job",
+        "family_deity",
+        "family_email",
+        "family_search_alias",
+        "family_password",
+    )
+    for field_name, value in zip(positional_fields, unlabeled_values):
+        parsed_details[field_name] = value
+    return parsed_details
+
+
+def transliterate_to_tamil(text):
+    """Return the first Tamil suggestion for Tanglish text, or the original text on failure."""
+    if not text.strip():
+        return text
+    query = urllib.parse.urlencode(
+        {"text": text, "itc": "ta-t-i0-und", "num": 1, "cp": 0, "cs": 1, "ie": "utf-8", "oe": "utf-8"}
+    )
+    try:
+        with urllib.request.urlopen(
+            f"https://inputtools.google.com/request?{query}", timeout=5
+        ) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        suggestions = payload[1][0][1]
+        return suggestions[0] if suggestions else text
+    except Exception:
+        return text
+
+
+st.set_page_config(page_title="Moi Sei Staff", page_icon="M", layout="wide")
 st.title("Moi Sei")
-st.caption("Record a contribution after checking both families and the event.")
+st.caption("Family registration")
 require_admin_login()
 
 try:
@@ -79,280 +179,314 @@ except Exception as error:
     st.code(str(error))
     st.stop()
 
-st.subheader("Record Contribution")
-st.write("Enter mobile numbers. The details will appear before you submit.")
-
-input_col1, input_col2, input_col3, input_col4 = st.columns(4)
-with input_col3:
-    event_id = st.number_input("Event ID", min_value=101, step=1, value=101)
-
-try:
-    event_preview = get_event_with_host(int(event_id))
-except Exception:
-    event_preview = None
-
-with input_col1:
-    contributor_phone = st.text_input("Contributor Mobile Number", placeholder="9000000001")
-with input_col2:
-    if event_preview and event_preview["host_user_id"]:
-        receiver_phone = st.text_input(
-            "Receiver Mobile Number",
-            value=event_preview["host_phone_number"],
-            disabled=True,
-            help="This event's receiver is locked and cannot be changed.",
-        )
+st.subheader("Quick Paste for a New Family")
+st.caption("Paste one value per line in this order: Phone, Husband, Wife, Place, Job, Deity, Email, Tanglish alias, Password.")
+pasted_details = st.text_area(
+    "Paste family details",
+    key="family_paste_details",
+    placeholder=(
+        "7411346811\nSarangabani\nSaranya\nKalluthu\nIT\nNalla Kurumban\n"
+        "family@example.com\nsarangabani\nwelcome123"
+    ),
+)
+if st.button("Parse Details", type="secondary"):
+    parsed_details = parse_family_details(pasted_details)
+    if parsed_details:
+        st.session_state["parsed_family_details"] = parsed_details
+        st.session_state.pop("family_id", None)
+        st.rerun()
     else:
-        receiver_phone = st.text_input("Receiver Mobile Number", placeholder="9000000002")
-with input_col4:
-    amount = st.number_input("Amount", min_value=0.01, step=50.0, value=50.0, format="%.2f")
+        st.error("Paste at least Phone, Husband, Wife, and Place, one value per line.")
 
-if event_preview:
-    if event_preview["host_user_id"]:
-        st.caption(
-            f"\U0001F512 Receiver locked for this event: "
-            f"**{event_preview['host_husband_name']}** ({event_preview['host_phone_number']})"
-        )
-    else:
-        st.caption("No receiver locked yet for this event. The first contribution will lock it in.")
-else:
-    st.caption(f"Event ID {int(event_id)} was not found.")
+st.divider()
+st.subheader("Family Details")
+st.caption("Type a husband name or mobile number. Matching families appear directly under that field.")
 
-if st.button("Add New Family", type="secondary", use_container_width=True):
-    st.session_state["show_direct_family_form"] = True
+# A selected match is loaded before Streamlit creates the form fields below.
+if "family_to_load" in st.session_state:
+    set_family_form_values(get_family(st.session_state.pop("family_to_load")))
 
-if st.session_state.get("show_direct_family_form"):
-    st.divider()
-    st.subheader("Register New Family")
-    st.caption("Use this form to register a family before recording a contribution.")
+if "family_save_message" in st.session_state:
+    st.success(st.session_state.pop("family_save_message"))
 
-    with st.form("direct_new_family_form"):
-        direct_col1, direct_col2 = st.columns(2)
-        with direct_col1:
-            direct_husband_name = st.text_input("Husband name *")
-            direct_wife_name = st.text_input("Wife name")
-            direct_husband_job = st.text_input("Husband job")
-            direct_phone = st.text_input("Phone number *")
-        with direct_col2:
-            direct_place = st.text_input("Place")
-            direct_family_deity = st.text_input("Family deity")
-            direct_email = st.text_input("Email")
-            direct_password = st.text_input("Initial portal password *", type="password")
+# Parsed paste values must also be applied before Streamlit creates the input widgets.
+if "parsed_family_details" in st.session_state:
+    for field_name, value in st.session_state.pop("parsed_family_details").items():
+        st.session_state[field_name] = value
 
-        direct_save_button = st.form_submit_button("Save New Family", type="primary")
+if "tamil_converted_details" in st.session_state:
+    for field_name, value in st.session_state.pop("tamil_converted_details").items():
+        st.session_state[field_name] = value
 
-    if direct_save_button:
-        if not direct_husband_name.strip() or not direct_phone.strip() or not direct_password:
-            st.error("Husband name, phone number, and portal password are required.")
-        elif len(direct_password) < 6:
-            st.error("Portal password must be at least 6 characters.")
-        else:
-            direct_success, direct_result = create_family(
-                direct_husband_name.strip(),
-                direct_wife_name.strip(),
-                direct_husband_job.strip(),
-                direct_phone.strip(),
-                direct_place.strip(),
-                direct_family_deity.strip(),
-                direct_email.strip(),
-                direct_password,
-            )
-            if direct_success:
-                st.success(f"Family registered successfully. Family ID: {direct_result}")
-                st.session_state.pop("show_direct_family_form", None)
-                st.rerun()
-            else:
-                st.error("Could not register family. The phone number may already exist.")
-                st.code(direct_result)
+new_family_col, _ = st.columns([1, 5])
+with new_family_col:
+    st.write("")
+    if st.button("New Family", type="secondary", use_container_width=True):
+        clear_family_form()
+        st.rerun()
 
-check_button = st.button("Check Details", type="secondary", use_container_width=True)
-
-if check_button:
-    st.session_state.pop("new_family_role", None)
-    st.session_state.pop("new_family_context", None)
-    contributor_phone = contributor_phone.strip()
-    receiver_phone = receiver_phone.strip()
-    try:
-        contributor = get_family_by_phone(contributor_phone) if contributor_phone else None
-        receiver = get_family_by_phone(receiver_phone) if receiver_phone else None
-        selected_event = get_event(int(event_id))
-
-        if not contributor_phone:
-            st.error("Enter the contributor's mobile number.")
-        elif not contributor:
-            st.warning(f"No family found for mobile number {contributor_phone}.")
-
-        if not receiver_phone:
-            st.error("Enter the receiver's mobile number.")
-        elif not receiver:
-            st.warning(f"No family found for mobile number {receiver_phone}.")
-
-        if not selected_event:
-            st.error(f"Event ID {int(event_id)} was not found.")
-
-        if contributor and receiver and selected_event:
-            st.session_state["checked_details"] = {
-                "contributor_id": contributor["id"],
-                "receiver_id": receiver["id"],
-                "event_id": int(event_id),
-            }
-            st.session_state["contributor"] = contributor
-            st.session_state["receiver"] = receiver
-            st.session_state["event"] = selected_event
-        elif selected_event and contributor_phone and receiver_phone and (not contributor or not receiver):
-            # Ask for whichever family is missing first; the other side is handled once saved.
-            if not contributor:
-                missing_role, missing_phone, other_role, other_family = (
-                    "contributor", contributor_phone, "receiver", receiver,
+form_col1, form_col2 = st.columns(2)
+with form_col1:
+    phone_number = st.text_input("Phone number *", key="family_phone_number", placeholder="Enter mobile digits")
+    if phone_number.strip() and not st.session_state.get("family_id"):
+        phone_matches = [
+            family_match
+            for family_match in search_families(phone_number)
+            if phone_number.strip() in family_match["phone_number"]
+        ]
+        if phone_matches:
+            st.caption("Matching families")
+            for family_match in phone_matches:
+                label = (
+                    f"{family_match['husband_name']} | {family_match['phone_number']} | "
+                    f"{family_match['place'] or 'Place not provided'}"
                 )
-            else:
-                missing_role, missing_phone, other_role, other_family = (
-                    "receiver", receiver_phone, "contributor", contributor,
-                )
-            st.session_state["new_family_role"] = missing_role
-            st.session_state["new_family_context"] = {
-                "phone_number": missing_phone,
-                "other_role": other_role,
-                "other_family": other_family,
-                "event": selected_event,
-                "event_id": int(event_id),
-            }
-    except Exception as error:
-        st.error("Could not read the requested details.")
-        st.code(str(error))
+                if st.button(label, key=f"phone_match_{family_match['id']}"):
+                    st.session_state["family_to_load"] = family_match["id"]
+                    st.rerun()
 
-if "new_family_context" in st.session_state:
-    context = st.session_state["new_family_context"]
-    role_label = st.session_state["new_family_role"].capitalize()
-    st.divider()
-    st.subheader(f"Add New {role_label} Family")
-    st.caption(
-        f"No family is registered with mobile number {context['phone_number']}. "
-        "Save their details, then continue."
+    wife_name = st.text_input("Wife name *", key="family_wife_name")
+    husband_job = st.text_input("Husband job", key="family_husband_job")
+    email = st.text_input("Email", key="family_email")
+with form_col2:
+    husband_name = st.text_input("Husband name *", key="family_husband_name")
+    if husband_name.strip() and not st.session_state.get("family_id"):
+        husband_matches = search_families(husband_name)
+        if husband_matches:
+            st.caption("Matching families")
+            for family_match in husband_matches:
+                label = (
+                    f"{family_match['husband_name']} | {family_match['phone_number']} | "
+                    f"{family_match['place'] or 'Place not provided'}"
+                )
+                if st.button(label, key=f"husband_match_{family_match['id']}"):
+                    st.session_state["family_to_load"] = family_match["id"]
+                    st.rerun()
+    place = st.text_input("Place *", key="family_place")
+    family_deity = st.text_input("Family deity", key="family_deity")
+    search_alias = st.text_input("English / Tanglish search name", key="family_search_alias")
+    portal_password = st.text_input(
+        "Portal password (new families or reset)",
+        type="password",
+        key="family_password",
     )
 
-    with st.form("new_family_form"):
-        form_col1, form_col2 = st.columns(2)
-        with form_col1:
-            new_husband_name = st.text_input("Husband name *")
-            new_wife_name = st.text_input("Wife name")
-            new_husband_job = st.text_input("Husband job")
-            st.text_input("Phone number", value=context["phone_number"], disabled=True)
-        with form_col2:
-            new_place = st.text_input("Place")
-            new_family_deity = st.text_input("Family deity")
-            new_email = st.text_input("Email")
-            new_password = st.text_input("Initial portal password *", type="password")
+existing_family_id = st.session_state.get("family_id")
+if existing_family_id:
+    st.success(
+        f"Existing family loaded: Family ID {existing_family_id}. "
+        "The details above came from the database."
+    )
 
-        create_button = st.form_submit_button("Save Family and Continue", type="primary")
+action_col1, action_col2, _ = st.columns([1, 1, 4])
+with action_col1:
+    save_new_family = st.button(
+        "Save New Family",
+        type="primary",
+        disabled=bool(existing_family_id),
+    )
+with action_col2:
+    st.button("Clear All Fields", type="secondary", on_click=clear_family_form)
 
-    if create_button:
-        if not new_husband_name.strip() or not new_password:
-            st.error("Husband name and an initial portal password are required.")
-        elif len(new_password) < 6:
+reset_password = st.button(
+    "Reset Portal Password",
+    type="secondary",
+    disabled=not bool(existing_family_id),
+)
+
+if reset_password:
+    if not portal_password:
+        st.error("Enter a new portal password before resetting it.")
+    elif len(portal_password) < 6:
+        st.error("Portal password must be at least 6 characters.")
+    else:
+        reset_success, reset_message = set_family_password(existing_family_id, portal_password)
+        if reset_success:
+            st.success("Portal password reset successfully. Share the new password securely with the family.")
+        else:
+            st.error(f"Could not reset the portal password: {reset_message}")
+
+convert_col, _ = st.columns([1, 5])
+with convert_col:
+    convert_to_tamil = st.button("Convert Tanglish to Tamil", type="secondary")
+
+if convert_to_tamil:
+    original_husband_name = husband_name.strip()
+    converted_fields = {
+        "family_husband_name": transliterate_to_tamil(original_husband_name),
+        "family_wife_name": transliterate_to_tamil(wife_name.strip()),
+        "family_husband_job": transliterate_to_tamil(husband_job.strip()),
+        "family_place": transliterate_to_tamil(place.strip()),
+        "family_deity": transliterate_to_tamil(family_deity.strip()),
+    }
+    if original_husband_name and not search_alias.strip():
+        converted_fields["family_search_alias"] = original_husband_name
+    st.session_state["tamil_converted_details"] = converted_fields
+    st.rerun()
+
+if save_new_family:
+        if not husband_name.strip() or not wife_name.strip() or not phone_number.strip() or not place.strip() or not portal_password:
+            st.error("Phone number, husband name, wife name, place, and initial portal password are required.")
+        elif len(portal_password) < 6:
             st.error("Portal password must be at least 6 characters.")
         else:
             success, result = create_family(
-                new_husband_name.strip(),
-                new_wife_name.strip(),
-                new_husband_job.strip(),
-                context["phone_number"],
-                new_place.strip(),
-                new_family_deity.strip(),
-                new_email.strip(),
-                new_password,
+                husband_name.strip(),
+                wife_name.strip(),
+                husband_job.strip(),
+                phone_number.strip(),
+                place.strip(),
+                family_deity.strip(),
+                email.strip(),
+                search_alias.strip(),
+                portal_password,
             )
             if success:
-                new_family = get_family(result)
-                if context["other_family"]:
-                    role = st.session_state["new_family_role"]
-                    contributor = new_family if role == "contributor" else context["other_family"]
-                    receiver = new_family if role == "receiver" else context["other_family"]
-                    st.session_state["checked_details"] = {
-                        "contributor_id": contributor["id"],
-                        "receiver_id": receiver["id"],
-                        "event_id": context["event_id"],
-                    }
-                    st.session_state["contributor"] = contributor
-                    st.session_state["receiver"] = receiver
-                    st.session_state["event"] = context["event"]
-                    st.session_state.pop("new_family_context", None)
-                    st.session_state.pop("new_family_role", None)
-                    st.success(f"Family saved with ID {result}.")
-                    st.rerun()
-                else:
-                    # The other side was also missing; ask for it next.
-                    st.session_state["new_family_role"] = context["other_role"]
-                    st.session_state["new_family_context"] = {
-                        "phone_number": receiver_phone if context["other_role"] == "receiver" else contributor_phone,
-                        "other_role": st.session_state["new_family_role"],
-                        "other_family": new_family,
-                        "event": context["event"],
-                        "event_id": context["event_id"],
-                    }
-                    st.success(f"Family saved with ID {result}. Now add the {context['other_role']} family.")
-                    st.rerun()
+                st.session_state["family_to_load"] = result
+                st.session_state["family_save_message"] = (
+                    f"New family saved successfully. Family ID: {result}"
+                )
+                st.rerun()
             else:
-                st.error("Could not save the new family.")
+                st.error("Could not save family. The phone number may already exist.")
                 st.code(result)
 
-if "contributor" in st.session_state:
-    st.divider()
-    st.subheader("Verify Before Saving")
-    details_col1, details_col2, details_col3 = st.columns(3)
-    with details_col1:
-        st.markdown("#### Contributor")
-        format_family(st.session_state["contributor"])
-    with details_col2:
-        st.markdown("#### Receiver")
-        format_family(st.session_state["receiver"])
-    with details_col3:
-        st.markdown("#### Event")
-        format_event(st.session_state["event"])
+st.divider()
+st.subheader("Record Contribution")
+st.caption("The family selected above is the contributor. Select an event and verify the cash denomination total before saving.")
 
-    checked = st.session_state["checked_details"]
-    st.info(f"Amount to record: **{float(amount):.2f}**")
+if not existing_family_id:
+    st.info("First select an existing family or save a new family above. That family will become the contributor.")
+else:
+    contributor = get_family(existing_family_id)
+    events = get_active_events()
+    event_options = {
+        f"{event['event_id']} | {event['event_name']} | {event['event_date']}": event
+        for event in events
+    }
 
-    notify_channel = st.radio(
-        "Send Confirmation Via",
-        ["WhatsApp", "None"],
-        horizontal=True,
-        index=0,
-    )
+    if not event_options:
+        st.warning("No active events are available. Create an event before recording contributions.")
+    else:
+        st.markdown("#### Contribution Details")
+        st.write(f"**Contributor:** {contributor['husband_name']} ({contributor['phone_number']})")
+        event_label = st.selectbox("Event", list(event_options), key="contribution_event")
+        selected_event = event_options[event_label]
 
-    if checked["contributor_id"] == checked["receiver_id"]:
-        st.error("Contributor and receiver must be different families.")
-    elif st.button("Submit Contribution", type="primary", use_container_width=True):
-        contributor = st.session_state.get("contributor", {})
-        receiver = st.session_state.get("receiver", {})
-        event_info = st.session_state.get("event", {})
-
-        success, message = process_contribution(
-            checked["contributor_id"],
-            checked["receiver_id"],
-            checked["event_id"],
-            float(amount),
-        )
-        if success:
-            st.success(message)
-
-            # Send Notification based on chosen channel
-            if notify_channel == "WhatsApp":
-                wa_sent, wa_msg = send_contribution_whatsapp(
-                    contributor_phone=contributor.get("phone_number", ""),
-                    contributor_name=contributor.get("husband_name", "Contributor"),
-                    amount=float(amount),
-                    event_name=event_info.get("event_name", "Event"),
-                    receiver_name=receiver.get("husband_name", "Host"),
+        if selected_event["host_user_id"]:
+            receiver = get_family(selected_event["host_user_id"])
+            st.write(f"**Receiver:** {receiver['husband_name']} ({receiver['phone_number']})")
+            st.caption("This event already has a receiver. You can change it below if no contribution has been recorded yet.")
+            receiver_options = {
+                f"{family['husband_name']} | {family['phone_number']}": family
+                for family in get_active_families_for_search()
+                if family["id"] != contributor["id"]
+            }
+            change_receiver_label = st.selectbox(
+                "Change receiver for this event",
+                list(receiver_options),
+                index=next(
+                    (
+                        index
+                        for index, family_option in enumerate(receiver_options.values())
+                        if family_option["id"] == receiver["id"]
+                    ),
+                    0,
+                ),
+                key="change_event_receiver",
+            )
+            new_receiver = receiver_options[change_receiver_label]
+            receiver_changed = new_receiver["id"] != receiver["id"]
+            if not receiver_changed:
+                st.caption(
+                    f"{receiver['husband_name']} is already assigned as this event's receiver. "
+                    "Select a different family only if this event has no contributions yet."
                 )
-                if wa_sent:
-                    st.info(f"💬 {wa_msg}")
+            if st.button("Save Event Receiver", type="secondary", disabled=not receiver_changed):
+                change_success, change_message = change_event_receiver(
+                    selected_event["event_id"],
+                    new_receiver["id"],
+                )
+                if change_success:
+                    st.success(change_message)
+                    st.rerun()
                 else:
-                    st.caption(f"ℹ️ WhatsApp Notification: {wa_msg}")
-
-            st.session_state.pop("checked_details", None)
-            st.session_state.pop("contributor", None)
-            st.session_state.pop("receiver", None)
-            st.session_state.pop("event", None)
+                    st.error(change_message)
         else:
-            st.error(message)
+            receiver_options = {
+                f"{family['husband_name']} | {family['phone_number']}": family
+                for family in get_active_families_for_search()
+                if family["id"] != contributor["id"]
+            }
+            receiver_label = st.selectbox(
+                "Receiver for this event",
+                list(receiver_options),
+                key="contribution_receiver",
+            )
+            receiver = receiver_options[receiver_label]
+            st.caption("This first receiver will be locked as the event host after saving.")
+
+        contribution_amount = st.number_input(
+            "Contribution amount *",
+            min_value=0.01,
+            step=50.0,
+            value=50.0,
+            format="%.2f",
+        )
+
+        st.markdown("#### Cash Denomination")
+        st.caption("Enter the note count. The subtotal for each denomination appears below it.")
+        denominations = (1000, 500, 200, 100, 50, 20, 10)
+        denomination_columns = st.columns(len(denominations))
+        denomination_counts = {}
+        denomination_subtotals = {}
+        for denomination, denomination_column in zip(denominations, denomination_columns):
+            with denomination_column:
+                st.markdown(f"**₹{denomination} notes**")
+                note_count = st.number_input(
+                    "Count",
+                    min_value=0,
+                    step=1,
+                    value=0,
+                    key=f"contribution_denomination_{denomination}",
+                )
+                denomination_counts[denomination] = note_count
+                denomination_subtotals[denomination] = denomination * note_count
+                st.caption(f"Total: ₹{denomination_subtotals[denomination]:,.2f}")
+
+        denomination_total = sum(
+            denomination * note_count
+            for denomination, note_count in denomination_counts.items()
+        )
+        note_count_total = sum(denomination_counts.values())
+        denomination_matches = abs(float(contribution_amount) - float(denomination_total)) < 0.001
+
+        st.markdown(f"**Notes:** {note_count_total}  |  **Cash total:** ₹{denomination_total:,.2f}")
+
+        if denomination_matches:
+            st.success("Contribution amount matches the cash denomination total.")
+        elif denomination_total < contribution_amount:
+            st.error(
+                f"Cash total ₹{denomination_total:,.2f} is less than the "
+                f"contribution amount ₹{contribution_amount:,.2f}."
+            )
+        else:
+            st.warning(
+                f"Cash total ₹{denomination_total:,.2f} is more than the "
+                f"contribution amount ₹{contribution_amount:,.2f}."
+            )
+
+        if contributor["id"] == receiver["id"]:
+            st.error("Contributor and receiver must be different families.")
+        elif st.button("Save Contribution", type="primary", disabled=not denomination_matches):
+            success, message = process_contribution(
+                contributor["id"],
+                receiver["id"],
+                selected_event["event_id"],
+                contribution_amount,
+            )
+            if success:
+                st.success(f"Contribution recorded successfully: ₹{contribution_amount:,.2f}")
+            else:
+                st.error(message)
 

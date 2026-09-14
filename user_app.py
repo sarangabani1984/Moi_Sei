@@ -12,6 +12,7 @@ from db import (
     get_my_received_contributions,
     get_upcoming_partner_events,
     set_family_password,
+    update_family_profile,
     update_event_by_host,
     verify_password,
 )
@@ -84,11 +85,112 @@ if "logged_in_family" in st.session_state:
 
     st.divider()
 
-    tab_upcoming, tab_my_events, tab_history = st.tabs([
+    tab_profile, tab_upcoming, tab_my_events, tab_history = st.tabs([
+        "👤 My Profile",
         "📅 Upcoming Partner Events",
         "📣 Schedule & Manage My Events",
         "📊 My Give & Take History",
     ])
+
+    # -------------------------------------------------------------------------
+    # TAB 0: Family Profile
+    # -------------------------------------------------------------------------
+    with tab_profile:
+        st.subheader("My Family Profile")
+        st.caption(
+            "Review and update your family details. The registered phone number "
+            "stays unchanged because it is your login ID."
+        )
+
+        with st.form("family_profile_form"):
+            profile_col1, profile_col2 = st.columns(2)
+            with profile_col1:
+                st.text_input(
+                    "Registered phone number",
+                    value=family["phone_number"] or "",
+                    disabled=True,
+                )
+                profile_husband_name = st.text_input(
+                    "Husband name *", value=family["husband_name"] or ""
+                )
+                profile_wife_name = st.text_input(
+                    "Wife name", value=family["wife_name"] or ""
+                )
+                profile_husband_job = st.text_input(
+                    "Husband job", value=family["husband_job"] or ""
+                )
+                profile_email = st.text_input(
+                    "Email", value=family["email"] or ""
+                )
+            with profile_col2:
+                st.text_input("Family ID", value=str(family["id"]), disabled=True)
+                profile_place = st.text_input(
+                    "Place", value=family["place"] or ""
+                )
+                profile_family_deity = st.text_input(
+                    "Family deity", value=family["family_deity"] or ""
+                )
+                profile_search_alias = st.text_input(
+                    "English / Tanglish search name",
+                    value=family.get("search_alias") or "",
+                )
+
+            profile_save_button = st.form_submit_button(
+                "Save Profile Changes", type="primary"
+            )
+
+        if profile_save_button:
+            if not profile_husband_name.strip():
+                st.error("Husband name is required.")
+            else:
+                profile_success, profile_message = update_family_profile(
+                    user_id=family["id"],
+                    husband_name=profile_husband_name.strip(),
+                    wife_name=profile_wife_name.strip(),
+                    husband_job=profile_husband_job.strip(),
+                    place=profile_place.strip(),
+                    family_deity=profile_family_deity.strip(),
+                    email=profile_email.strip(),
+                    search_alias=profile_search_alias.strip(),
+                )
+                if profile_success:
+                    st.session_state["logged_in_family"] = get_family_by_phone(
+                        family["phone_number"]
+                    )
+                    st.success(profile_message)
+                    st.rerun()
+                else:
+                    st.error(profile_message)
+
+        st.divider()
+        st.subheader("Change Portal Password")
+        with st.form("family_password_change_form"):
+            current_password = st.text_input("Current password", type="password")
+            new_password = st.text_input("New password", type="password")
+            confirm_new_password = st.text_input(
+                "Confirm new password", type="password"
+            )
+            password_change_button = st.form_submit_button(
+                "Change Password", type="secondary"
+            )
+
+        if password_change_button:
+            if not current_password or not verify_password(
+                current_password, family.get("password_hash") or ""
+            ):
+                st.error("Current password is incorrect.")
+            elif len(new_password) < 6:
+                st.error("New password must be at least 6 characters.")
+            elif new_password != confirm_new_password:
+                st.error("New passwords do not match.")
+            else:
+                password_success, password_message = set_family_password(
+                    family["id"], new_password
+                )
+                if password_success:
+                    st.success("Portal password changed successfully.")
+                else:
+                    st.error(password_message)
 
     # -------------------------------------------------------------------------
     # TAB 1: Upcoming Events from Reciprocity Partners
@@ -109,6 +211,8 @@ if "logged_in_family" in st.session_state:
                     "host_husband_name",
                     "host_phone_number",
                     "partner_contributed_to_you",
+                    "you_contributed_to_host",
+                    "net_difference",
                 ]
                 st.dataframe(
                     partner_events,
@@ -121,7 +225,15 @@ if "logged_in_family" in st.session_state:
                         "host_husband_name": "Host Name",
                         "host_phone_number": "Host Mobile",
                         "partner_contributed_to_you": st.column_config.NumberColumn(
-                            "Host Contributed to You",
+                            "Previously Received from Host",
+                            format="%.2f",
+                        ),
+                        "you_contributed_to_host": st.column_config.NumberColumn(
+                            "Previously Given to Host",
+                            format="%.2f",
+                        ),
+                        "net_difference": st.column_config.NumberColumn(
+                            "Net Difference",
                             format="%.2f",
                         ),
                     },
@@ -131,10 +243,11 @@ if "logged_in_family" in st.session_state:
                     float(row["partner_contributed_to_you"] or 0)
                     for row in partner_events
                 )
-                st.metric(
-                    "Total Previously Contributed by These Hosts",
-                    f"{total_partner_contributions:,.2f}",
-                )
+                total_given_to_user = sum(float(row["partner_contributed_to_you"] or 0) for row in partner_events)
+                total_user_given = sum(float(row["you_contributed_to_host"] or 0) for row in partner_events)
+                st.write(f"**Total previously received from these hosts:** {total_given_to_user:,.2f}")
+                st.write(f"**Total previously given to these hosts:** {total_user_given:,.2f}")
+                st.metric("Overall Net Difference", f"{total_given_to_user - total_user_given:,.2f}")
             else:
                 st.info("No upcoming functions scheduled by your reciprocity partners yet.")
         except Exception as error:

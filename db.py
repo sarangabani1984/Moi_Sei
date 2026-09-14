@@ -181,6 +181,80 @@ def get_family_by_phone(phone_number):
     return get_family(rows[0]["id"])
 
 
+def get_family_by_husband_name(husband_name):
+    """Find one active family by an exact husband name, case-insensitively."""
+    sql_mssql = """
+        SELECT TOP 1 id FROM dbo.users
+        WHERE LOWER(husband_name) = LOWER(?) AND is_active = 1
+    """
+    sql_pg = """
+        SELECT id FROM users
+        WHERE LOWER(husband_name) = LOWER(%s) AND is_active = TRUE
+        LIMIT 1
+    """
+    row = fetch_one(sql_mssql, sql_pg, husband_name.strip())
+    return get_family(row["id"]) if row else None
+
+
+def search_families(search_text):
+    """Return active families whose Tamil/English name, alias, or phone matches."""
+    search_text = search_text.strip()
+    connection = get_connection()
+    cursor = connection.cursor()
+    pattern = f"%{search_text}%"
+    if is_postgres_mode():
+        cursor.execute(
+            """
+                        SELECT id, husband_name, wife_name, phone_number, place
+            FROM users
+            WHERE is_active = TRUE
+                            AND (husband_name ILIKE %s OR wife_name ILIKE %s OR phone_number LIKE %s OR search_alias ILIKE %s)
+            ORDER BY husband_name
+            LIMIT 10;
+            """,
+            (pattern, pattern, pattern, pattern),
+        )
+    else:
+        cursor.execute(
+            """
+                        SELECT TOP 10 id, husband_name, wife_name, phone_number, place
+            FROM dbo.users
+            WHERE is_active = 1
+                            AND (husband_name LIKE ? OR wife_name LIKE ? OR phone_number LIKE ? OR search_alias LIKE ?)
+            ORDER BY husband_name;
+            """,
+            (pattern, pattern, pattern, pattern),
+        )
+    columns = [column[0] for column in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def get_active_families_for_search():
+    """Return active family choices for the staff searchable name field."""
+    connection = get_connection()
+    cursor = connection.cursor()
+    if is_postgres_mode():
+        cursor.execute(
+            """
+            SELECT id, husband_name, phone_number, place, search_alias
+            FROM users
+            WHERE is_active = TRUE
+            ORDER BY husband_name;
+            """
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT id, husband_name, phone_number, place, search_alias
+            FROM dbo.users
+            WHERE is_active = 1
+            ORDER BY husband_name;
+            """
+        )
+    columns = [column[0] for column in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
 def get_my_contributions(user_id):
     """Return every contribution this family has given, with receiver details."""
     return fetch_procedure_rows("sp_GetMyContributions", user_id)
@@ -205,13 +279,13 @@ def get_family(user_id):
     """Fetch one family's full profile by their permanent id, or None if not found."""
     sql_mssql = """
          SELECT id, husband_name, wife_name, husband_job, phone_number,
-             place, family_deity, email, password_hash, is_active
+             place, family_deity, email, search_alias, password_hash, is_active
         FROM dbo.users
         WHERE id = ?
     """
     sql_pg = """
          SELECT id, husband_name, wife_name, husband_job, phone_number,
-             place, family_deity, email, password_hash, is_active
+             place, family_deity, email, search_alias, password_hash, is_active
         FROM users
         WHERE id = %s
     """
@@ -233,6 +307,32 @@ def get_event(event_id):
         WHERE event_id = %s
     """
     return fetch_one(sql_mssql, sql_pg, event_id)
+
+
+def get_active_events():
+    """Return active events for the staff contribution entry screen."""
+    connection = get_connection()
+    cursor = connection.cursor()
+    if is_postgres_mode():
+        cursor.execute(
+            """
+            SELECT event_id, event_name, event_date, event_place, host_user_id
+            FROM event
+            WHERE is_active = TRUE
+            ORDER BY event_date DESC, event_id DESC;
+            """
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT event_id, event_name, event_date, event_place, host_user_id
+            FROM dbo.event
+            WHERE is_active = 1
+            ORDER BY event_date DESC, event_id DESC;
+            """
+        )
+    columns = [column[0] for column in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
 def get_event_with_host(event_id):
@@ -258,7 +358,7 @@ def get_event_with_host(event_id):
     return fetch_one(sql_mssql, sql_pg, event_id)
 
 
-def create_family(husband_name, wife_name, husband_job, phone_number, place, family_deity, email, password):
+def create_family(husband_name, wife_name, husband_job, phone_number, place, family_deity, email, search_alias, password):
     """Insert a new family record and return its new permanent id."""
     connection = get_connection()
     cursor = connection.cursor()
@@ -267,8 +367,8 @@ def create_family(husband_name, wife_name, husband_job, phone_number, place, fam
             cursor.execute(
                 """
                 INSERT INTO users
-                    (husband_name, wife_name, husband_job, phone_number, place, family_deity, email, password_hash)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    (husband_name, wife_name, husband_job, phone_number, place, family_deity, email, search_alias, password_hash)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id;
                 """,
                 (
@@ -279,6 +379,7 @@ def create_family(husband_name, wife_name, husband_job, phone_number, place, fam
                     place or None,
                     family_deity or None,
                     email or None,
+                    search_alias or None,
                     hash_password(password),
                 ),
             )
@@ -287,9 +388,9 @@ def create_family(husband_name, wife_name, husband_job, phone_number, place, fam
             cursor.execute(
                 """
                 INSERT INTO dbo.users
-                    (husband_name, wife_name, husband_job, phone_number, place, family_deity, email, password_hash)
+                    (husband_name, wife_name, husband_job, phone_number, place, family_deity, email, search_alias, password_hash)
                 OUTPUT INSERTED.id
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 husband_name,
                 wife_name or None,
@@ -298,6 +399,7 @@ def create_family(husband_name, wife_name, husband_job, phone_number, place, fam
                 place or None,
                 family_deity or None,
                 email or None,
+                search_alias or None,
                 hash_password(password),
             )
             new_id = cursor.fetchone()[0]
@@ -309,7 +411,7 @@ def create_family(husband_name, wife_name, husband_job, phone_number, place, fam
 
 
 def set_family_password(user_id, password):
-    """Set a password for an existing family that has no password yet."""
+    """Set or replace the portal password for an existing family."""
     connection = get_connection()
     cursor = connection.cursor()
     try:
@@ -319,6 +421,102 @@ def set_family_password(user_id, password):
             cursor.execute("UPDATE dbo.users SET password_hash = ? WHERE id = ?", hash_password(password), user_id)
         connection.commit()
         return True, "Password created successfully."
+    except Exception as error:
+        connection.rollback()
+        return False, str(error)
+
+
+def update_family_profile(
+    user_id,
+    husband_name,
+    wife_name,
+    husband_job,
+    place,
+    family_deity,
+    email,
+    search_alias,
+):
+    """Update editable profile fields while keeping the login phone unchanged."""
+    connection = get_connection()
+    cursor = connection.cursor()
+    try:
+        if is_postgres_mode():
+            cursor.execute(
+                """
+                UPDATE users
+                SET husband_name = %s, wife_name = %s, husband_job = %s,
+                    place = %s, family_deity = %s, email = %s,
+                    search_alias = %s, updated_at = NOW()
+                WHERE id = %s AND is_active = TRUE
+                """,
+                (husband_name, wife_name or None, husband_job or None, place or None,
+                 family_deity or None, email or None, search_alias or None, user_id),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE dbo.users
+                SET husband_name = ?, wife_name = ?, husband_job = ?,
+                    place = ?, family_deity = ?, email = ?,
+                    search_alias = ?, updated_at = SYSDATETIME()
+                WHERE id = ? AND is_active = 1
+                """,
+                husband_name, wife_name or None, husband_job or None, place or None,
+                family_deity or None, email or None, search_alias or None, user_id,
+            )
+        if cursor.rowcount != 1:
+            connection.rollback()
+            return False, "Family profile was not found or is inactive."
+        connection.commit()
+        return True, "Profile updated successfully."
+    except Exception as error:
+        connection.rollback()
+        return False, str(error)
+
+
+def change_event_receiver(event_id, receiver_id):
+    """Change an event's receiver before its first contribution is recorded."""
+    connection = get_connection()
+    cursor = connection.cursor()
+    try:
+        if is_postgres_mode():
+            cursor.execute(
+                "SELECT COUNT(*) FROM journal_entries WHERE event_id = %s",
+                (event_id,),
+            )
+            contribution_count = cursor.fetchone()[0]
+            if contribution_count:
+                return False, "The receiver cannot be changed after contributions have been recorded for this event."
+            cursor.execute(
+                """
+                UPDATE event
+                SET host_user_id = %s, updated_at = NOW()
+                WHERE event_id = %s AND is_active = TRUE
+                """,
+                (receiver_id, event_id),
+            )
+        else:
+            cursor.execute(
+                "SELECT COUNT(*) FROM dbo.journal_entries WHERE event_id = ?",
+                event_id,
+            )
+            contribution_count = cursor.fetchone()[0]
+            if contribution_count:
+                return False, "The receiver cannot be changed after contributions have been recorded for this event."
+            cursor.execute(
+                """
+                UPDATE dbo.event
+                SET host_user_id = ?, updated_at = SYSDATETIME()
+                WHERE event_id = ? AND is_active = 1
+                """,
+                receiver_id,
+                event_id,
+            )
+        if cursor.rowcount != 1:
+            connection.rollback()
+            return False, "The event was not found or is inactive."
+        connection.commit()
+        return True, "Event receiver changed successfully."
     except Exception as error:
         connection.rollback()
         return False, str(error)
@@ -483,6 +681,36 @@ def get_upcoming_partner_events(user_id):
                       AND incoming.user_id = %s
                       AND outgoing.user_id = e.host_user_id
                 ), 0) AS partner_contributed_to_you
+                                , COALESCE((
+                                        SELECT SUM(outgoing.amount)
+                                        FROM journal_entries outgoing
+                                        JOIN journal_entries incoming
+                                                ON incoming.transaction_id = outgoing.transaction_id
+                                             AND incoming.entry_type = 'RECEIVED'
+                                        WHERE outgoing.entry_type = 'CONTRIBUTED'
+                                            AND outgoing.user_id = %s
+                                            AND incoming.user_id = e.host_user_id
+                                ), 0) AS you_contributed_to_host
+                                , COALESCE((
+                                        SELECT SUM(incoming.amount)
+                                        FROM journal_entries incoming
+                                        JOIN journal_entries outgoing
+                                                ON outgoing.transaction_id = incoming.transaction_id
+                                             AND outgoing.entry_type = 'CONTRIBUTED'
+                                        WHERE incoming.entry_type = 'RECEIVED'
+                                            AND incoming.user_id = %s
+                                            AND outgoing.user_id = e.host_user_id
+                                ), 0)
+                                - COALESCE((
+                                        SELECT SUM(outgoing.amount)
+                                        FROM journal_entries outgoing
+                                        JOIN journal_entries incoming
+                                                ON incoming.transaction_id = outgoing.transaction_id
+                                             AND incoming.entry_type = 'RECEIVED'
+                                        WHERE outgoing.entry_type = 'CONTRIBUTED'
+                                            AND outgoing.user_id = %s
+                                            AND incoming.user_id = e.host_user_id
+                                ), 0) AS net_difference
             FROM event e
             JOIN users h ON h.id = e.host_user_id
             JOIN partner_ids p ON p.partner_id = e.host_user_id
@@ -490,7 +718,7 @@ def get_upcoming_partner_events(user_id):
               AND e.event_date >= CURRENT_DATE
             ORDER BY e.event_date ASC;
             """,
-            (user_id, user_id, user_id, user_id),
+            (user_id, user_id, user_id, user_id, user_id, user_id, user_id),
         )
     else:
         cursor.execute(
@@ -523,6 +751,36 @@ def get_upcoming_partner_events(user_id):
                       AND incoming.user_id = ?
                       AND outgoing.user_id = e.host_user_id
                 ), 0) AS partner_contributed_to_you
+                                , ISNULL((
+                                        SELECT SUM(outgoing.amount)
+                                        FROM journal_entries outgoing
+                                        JOIN journal_entries incoming
+                                                ON incoming.transaction_id = outgoing.transaction_id
+                                             AND incoming.entry_type = 'RECEIVED'
+                                        WHERE outgoing.entry_type = 'CONTRIBUTED'
+                                            AND outgoing.user_id = ?
+                                            AND incoming.user_id = e.host_user_id
+                                ), 0) AS you_contributed_to_host
+                                , ISNULL((
+                                        SELECT SUM(incoming.amount)
+                                        FROM journal_entries incoming
+                                        JOIN journal_entries outgoing
+                                                ON outgoing.transaction_id = incoming.transaction_id
+                                             AND outgoing.entry_type = 'CONTRIBUTED'
+                                        WHERE incoming.entry_type = 'RECEIVED'
+                                            AND incoming.user_id = ?
+                                            AND outgoing.user_id = e.host_user_id
+                                ), 0)
+                                - ISNULL((
+                                        SELECT SUM(outgoing.amount)
+                                        FROM journal_entries outgoing
+                                        JOIN journal_entries incoming
+                                                ON incoming.transaction_id = outgoing.transaction_id
+                                             AND incoming.entry_type = 'RECEIVED'
+                                        WHERE outgoing.entry_type = 'CONTRIBUTED'
+                                            AND outgoing.user_id = ?
+                                            AND incoming.user_id = e.host_user_id
+                                ), 0) AS net_difference
             FROM dbo.event e
             JOIN dbo.users h ON h.id = e.host_user_id
             JOIN partner_ids p ON p.partner_id = e.host_user_id
@@ -530,7 +788,7 @@ def get_upcoming_partner_events(user_id):
               AND e.event_date >= CONVERT(DATE, SYSDATETIME())
             ORDER BY e.event_date ASC;
             """,
-            (user_id, user_id, user_id, user_id),
+            (user_id, user_id, user_id, user_id, user_id, user_id, user_id),
         )
     columns = [column[0] for column in cursor.description]
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
