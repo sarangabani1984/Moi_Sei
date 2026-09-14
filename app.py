@@ -15,6 +15,7 @@ from db import (
     process_contribution,
     search_families,
     set_family_password,
+    update_family_profile,
 )
 
 
@@ -287,6 +288,35 @@ with action_col1:
     )
 with action_col2:
     st.button("Clear All Fields", type="secondary", on_click=clear_family_form)
+
+save_family_changes = st.button(
+    "Save Family Changes",
+    type="secondary",
+    disabled=not bool(existing_family_id),
+)
+
+if save_family_changes:
+    if not husband_name.strip():
+        st.error("Husband name is required.")
+    else:
+        update_success, update_message = update_family_profile(
+            user_id=existing_family_id,
+            husband_name=husband_name.strip(),
+            wife_name=wife_name.strip(),
+            husband_job=husband_job.strip(),
+            place=place.strip(),
+            family_deity=family_deity.strip(),
+            email=email.strip(),
+            search_alias=search_alias.strip(),
+        )
+        if update_success:
+            st.session_state["family_to_load"] = existing_family_id
+            st.session_state["family_save_message"] = (
+                "Family details and English/Tanglish search name updated successfully."
+            )
+            st.rerun()
+        else:
+            st.error(update_message)
 
 reset_password = st.button(
     "Reset Portal Password",
