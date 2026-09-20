@@ -2,6 +2,7 @@ import json
 import hashlib
 import os
 import re
+import threading
 import urllib.parse
 import streamlit as st
 
@@ -95,9 +96,11 @@ def is_postgres_mode() -> bool:
     return bool(uri and PSYCOPG2_AVAILABLE)
 
 
-@st.cache_resource
-def get_connection():
-    """Opens a connection to PostgreSQL (if configured) or SQL Server Express."""
+_thread_local = threading.local()
+
+
+def _create_connection():
+    """Opens a fresh connection to PostgreSQL (if configured) or SQL Server Express."""
     postgres_uri = _get_secret_or_env("MOI_SEI_POSTGRES_URL") or _get_secret_or_env("POSTGRES_URL")
 
     if postgres_uri and PSYCOPG2_AVAILABLE:
@@ -136,6 +139,34 @@ def get_connection():
         return pyodbc.connect(connection_string)
 
     raise RuntimeError("Neither PostgreSQL (psycopg2) nor SQL Server (pyodbc) driver is available.")
+
+
+def get_connection():
+    """Return a per-thread database connection.
+
+    Each thread (e.g. an API worker thread or the Streamlit script thread) gets
+    its own connection, reused across calls. This avoids sharing a single
+    connection across threads, which is not safe for pyodbc/psycopg2 and caused
+    500 errors under concurrent requests.
+    """
+    connection = getattr(_thread_local, "connection", None)
+    if connection is not None:
+        try:
+            # Cheap liveness check; reuse if the connection is still healthy.
+            cursor = connection.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchall()
+            return connection
+        except Exception:
+            try:
+                connection.close()
+            except Exception:
+                pass
+            _thread_local.connection = None
+
+    connection = _create_connection()
+    _thread_local.connection = connection
+    return connection
 
 
 def fetch_one(query_mssql, query_pg, parameter):
@@ -275,17 +306,45 @@ def get_my_partner_transactions(user_id, other_user_id):
     return fetch_procedure_rows("sp_GetMyPartnerTransactions", user_id, other_user_id)
 
 
+def get_all_transaction_partners(user_id):
+    """
+    Get all families this user has EVER transacted with (gave or received money).
+    Returns list with phone_number, husband_name, id for sending notifications.
+    """
+    sql_mssql = """
+        SELECT DISTINCT u.id, u.phone_number, u.husband_name
+        FROM dbo.users u
+        JOIN dbo.journal_entries je ON (
+            (je.user_id = ? AND je.counterparty_id = u.id) OR
+            (je.counterparty_id = ? AND je.user_id = u.id)
+        )
+        WHERE u.id != ? AND u.is_active = 1
+        ORDER BY u.husband_name ASC
+    """
+    sql_pg = """
+        SELECT DISTINCT u.id, u.phone_number, u.husband_name
+        FROM users u
+        JOIN journal_entries je ON (
+            (je.user_id = %s AND je.counterparty_id = u.id) OR
+            (je.counterparty_id = %s AND je.user_id = u.id)
+        )
+        WHERE u.id != %s AND u.is_active = TRUE
+        ORDER BY u.husband_name ASC
+    """
+    return fetch_all(sql_mssql, sql_pg, user_id, user_id, user_id)
+
+
 def get_family(user_id):
     """Fetch one family's full profile by their permanent id, or None if not found."""
     sql_mssql = """
-         SELECT id, husband_name, wife_name, husband_job, phone_number,
-             place, family_deity, email, search_alias, password_hash, is_active
+         SELECT id, phone_number, native_place, current_place, husband_name, husband_job,
+             wife_name, wife_job, place, others, family_deity, email, search_alias, password_hash, is_active
         FROM dbo.users
         WHERE id = ?
     """
     sql_pg = """
-         SELECT id, husband_name, wife_name, husband_job, phone_number,
-             place, family_deity, email, search_alias, password_hash, is_active
+         SELECT id, phone_number, native_place, current_place, husband_name, husband_job,
+             wife_name, wife_job, place, others, family_deity, email, search_alias, password_hash, is_active
         FROM users
         WHERE id = %s
     """
@@ -358,7 +417,7 @@ def get_event_with_host(event_id):
     return fetch_one(sql_mssql, sql_pg, event_id)
 
 
-def create_family(husband_name, wife_name, husband_job, phone_number, place, family_deity, email, search_alias, password):
+def create_family(phone_number, native_place, current_place, husband_name, husband_job, wife_name, wife_job, others, family_deity, email, search_alias, password):
     """Insert a new family record and return its new permanent id."""
     connection = get_connection()
     cursor = connection.cursor()
@@ -367,16 +426,20 @@ def create_family(husband_name, wife_name, husband_job, phone_number, place, fam
             cursor.execute(
                 """
                 INSERT INTO users
-                    (husband_name, wife_name, husband_job, phone_number, place, family_deity, email, search_alias, password_hash)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (phone_number, native_place, current_place, husband_name, husband_job, wife_name, wife_job, place, others, family_deity, email, search_alias, password_hash)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id;
                 """,
                 (
-                    husband_name,
-                    wife_name or None,
-                    husband_job or None,
                     phone_number,
-                    place or None,
+                    native_place or None,
+                    current_place or None,
+                    husband_name,
+                    husband_job or None,
+                    wife_name or None,
+                    wife_job or None,
+                    "",  # place: empty for now
+                    others or None,
                     family_deity or None,
                     email or None,
                     search_alias or None,
@@ -388,19 +451,25 @@ def create_family(husband_name, wife_name, husband_job, phone_number, place, fam
             cursor.execute(
                 """
                 INSERT INTO dbo.users
-                    (husband_name, wife_name, husband_job, phone_number, place, family_deity, email, search_alias, password_hash)
+                    (phone_number, native_place, current_place, husband_name, husband_job, wife_name, wife_job, place, others, family_deity, email, search_alias, password_hash)
                 OUTPUT INSERTED.id
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                husband_name,
-                wife_name or None,
-                husband_job or None,
-                phone_number,
-                place or None,
-                family_deity or None,
-                email or None,
-                search_alias or None,
-                hash_password(password),
+                (
+                    phone_number,
+                    native_place or None,
+                    current_place or None,
+                    husband_name,
+                    husband_job or None,
+                    wife_name or None,
+                    wife_job or None,
+                    "",  # place: empty for now
+                    others or None,
+                    family_deity or None,
+                    email or None,
+                    search_alias or None,
+                    hash_password(password),
+                ),
             )
             new_id = cursor.fetchone()[0]
         connection.commit()
@@ -428,10 +497,14 @@ def set_family_password(user_id, password):
 
 def update_family_profile(
     user_id,
+    native_place,
+    current_place,
     husband_name,
-    wife_name,
     husband_job,
+    wife_name,
+    wife_job,
     place,
+    others,
     family_deity,
     email,
     search_alias,
@@ -444,24 +517,26 @@ def update_family_profile(
             cursor.execute(
                 """
                 UPDATE users
-                SET husband_name = %s, wife_name = %s, husband_job = %s,
-                    place = %s, family_deity = %s, email = %s,
-                    search_alias = %s, updated_at = NOW()
+                SET native_place = %s, current_place = %s, husband_name = %s, husband_job = %s,
+                    wife_name = %s, wife_job = %s, place = %s, others = %s,
+                    family_deity = %s, email = %s, search_alias = %s, updated_at = NOW()
                 WHERE id = %s AND is_active = TRUE
                 """,
-                (husband_name, wife_name or None, husband_job or None, place or None,
+                (native_place or None, current_place or None, husband_name, husband_job or None,
+                 wife_name or None, wife_job or None, place or None, others or None,
                  family_deity or None, email or None, search_alias or None, user_id),
             )
         else:
             cursor.execute(
                 """
                 UPDATE dbo.users
-                SET husband_name = ?, wife_name = ?, husband_job = ?,
-                    place = ?, family_deity = ?, email = ?,
-                    search_alias = ?, updated_at = SYSDATETIME()
+                SET native_place = ?, current_place = ?, husband_name = ?, husband_job = ?,
+                    wife_name = ?, wife_job = ?, place = ?, others = ?,
+                    family_deity = ?, email = ?, search_alias = ?, updated_at = SYSDATETIME()
                 WHERE id = ? AND is_active = 1
                 """,
-                husband_name, wife_name or None, husband_job or None, place or None,
+                native_place or None, current_place or None, husband_name, husband_job or None,
+                wife_name or None, wife_job or None, place or None, others or None,
                 family_deity or None, email or None, search_alias or None, user_id,
             )
         if cursor.rowcount != 1:
@@ -533,15 +608,51 @@ def process_contribution(contributor_id, receiver_id, event_id, amount):
                 (contributor_id, receiver_id, event_id, amount),
             )
         else:
+            # Use EXEC for SQL Server instead of CALL syntax
             cursor.execute(
-                "{CALL dbo.sp_ProcessContribution (?, ?, ?, ?)}",
-                contributor_id,
-                receiver_id,
-                event_id,
-                amount,
+                "EXEC dbo.sp_ProcessContribution @ContributorId = ?, @ReceiverId = ?, @EventId = ?, @Amount = ?",
+                (contributor_id, receiver_id, event_id, amount),
             )
         connection.commit()
         return True, "Contribution recorded successfully."
+    except Exception as error:
+        connection.rollback()
+        return False, str(error)
+
+
+def process_group_contribution(contributor_ids, receiver_id, event_id, amount):
+    """
+    Record multiple contributions from different families (group mode).
+    All contributions are linked by the same group_id.
+    Returns: (success, group_id or error_message)
+    """
+    connection = get_connection()
+    cursor = connection.cursor()
+    try:
+        # Generate a unique group_id by creating one transaction entry first
+        if is_postgres_mode():
+            cursor.execute(
+                "INSERT INTO transactions (description) VALUES (%s) RETURNING transaction_id;",
+                (f"Group contribution to Family {receiver_id} - {len(contributor_ids)} families",),
+            )
+            group_id = cursor.fetchone()[0]
+        else:
+            cursor.execute(
+                "INSERT INTO dbo.transactions (description) VALUES (?)",
+                f"Group contribution to Family {receiver_id} - {len(contributor_ids)} families",
+            )
+            cursor.execute("SELECT CAST(SCOPE_IDENTITY() AS INT)")
+            group_id = cursor.fetchone()[0]
+        
+        # Now record each contribution with the same group_id
+        for contributor_id in contributor_ids:
+            success, msg = process_contribution(contributor_id, receiver_id, event_id, amount, group_id)
+            if not success:
+                connection.rollback()
+                return False, msg
+        
+        connection.commit()
+        return True, group_id
     except Exception as error:
         connection.rollback()
         return False, str(error)
@@ -597,11 +708,7 @@ def create_event_by_host(event_name, event_date, event_place, event_location, ho
                 OUTPUT INSERTED.event_id
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                event_name,
-                event_date,
-                event_place,
-                event_location or None,
-                host_user_id,
+                (event_name, event_date, event_place, event_location or None, host_user_id),
             )
             new_id = cursor.fetchone()[0]
         connection.commit()

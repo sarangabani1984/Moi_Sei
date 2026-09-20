@@ -57,6 +57,7 @@ CREATE TABLE event (
 CREATE TABLE transactions (
     transaction_id INT IDENTITY(1,1) PRIMARY KEY,
     description NVARCHAR(255) NULL,
+    group_id INT NULL,
     created_at DATETIME2 NOT NULL CONSTRAINT DF_transactions_created_at DEFAULT (SYSDATETIME()),
     transaction_date DATE NOT NULL CONSTRAINT DF_transactions_transaction_date DEFAULT (CONVERT(DATE, SYSDATETIME()))
 );
@@ -153,7 +154,8 @@ CREATE PROCEDURE sp_ProcessContribution
     @ContributorId INT,
     @ReceiverId INT,
     @EventId INT,
-    @Amount DECIMAL(12,2)
+    @Amount DECIMAL(12,2),
+    @GroupId INT = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -222,8 +224,8 @@ BEGIN
         END
 
         -- 2. Create Transaction Header
-        INSERT INTO transactions (description)
-        VALUES ('Contribution from User ' + CAST(@ContributorId AS VARCHAR) + ' to User ' + CAST(@ReceiverId AS VARCHAR));
+        INSERT INTO transactions (description, group_id)
+        VALUES ('Contribution from User ' + CAST(@ContributorId AS VARCHAR) + ' to User ' + CAST(@ReceiverId AS VARCHAR), @GroupId);
 
         SET @NewTxId = CONVERT(INT, SCOPE_IDENTITY());
 

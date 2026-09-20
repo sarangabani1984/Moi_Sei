@@ -1,4 +1,5 @@
 import datetime
+import pandas as pd
 import streamlit as st
 
 from db import (
@@ -15,7 +16,9 @@ from db import (
     update_family_profile,
     update_event_by_host,
     verify_password,
+    get_all_transaction_partners,
 )
+from notifications import broadcast_event_announcement
 
 
 st.set_page_config(page_title="Moi Sei Family Portal", page_icon="F", layout="wide")
@@ -300,32 +303,103 @@ if "logged_in_family" in st.session_state:
             if my_events:
                 st.dataframe(my_events, use_container_width=True, hide_index=True)
 
-                st.markdown("#### Update / Reschedule an Existing Event")
+                st.markdown("#### 📱 Send WhatsApp Invitation to Partners")
+                st.caption("Broadcast your event details to all families you've transacted with (gave or received money)")
+                
                 event_options = {
                     f"ID {evt['event_id']}: {evt['event_name']} ({evt['event_date']})": evt
                     for evt in my_events
                 }
-                selected_evt_label = st.selectbox("Select Event to Update", list(event_options.keys()))
+                selected_evt_label = st.selectbox("Select Event to Announce", list(event_options.keys()), key="whatsapp_event_select")
                 selected_evt = event_options[selected_evt_label]
+
+                # Show message preview
+                st.markdown("**📋 Message Preview:**")
+                preview_msg = (
+                    f"🎉 *Event Announcement* 🎉\n\n"
+                    f"Dear Friend,\n\n"
+                    f"*{family['husband_name']}* family cordially invites you to:\n\n"
+                    f"📌 *Event:* {selected_evt['event_name']}\n"
+                    f"📅 *Date:* {selected_evt['event_date']}\n"
+                    f"🏛️ *Venue:* {selected_evt['event_place']}\n"
+                    f"📍 *Location:* {selected_evt['event_location'] or 'TBA'}\n\n"
+                    f"🙏 We invite you to join us!\n"
+                    f"Please confirm your attendance.\n\n"
+                    f"📞 *Contact:* {family['phone_number']}\n\n"
+                    f"Best regards,\n"
+                    f"{family['husband_name']} Family"
+                )
+                st.text_area("Message to be sent via WhatsApp:", value=preview_msg, height=250, disabled=True)
+
+                # File upload for invitation (optional)
+                st.markdown("**📎 Optional: Attach Invitation (PDF or Image)**")
+                uploaded_file = st.file_uploader(
+                    "Upload invitation file",
+                    type=["pdf", "jpg", "jpeg", "png"],
+                    help="Optional: Add a PDF or image invitation to the WhatsApp message"
+                )
+                if uploaded_file:
+                    st.info(f"✅ File selected: {uploaded_file.name}")
+
+                # Send button with confirmation
+                if st.button("📤 Send WhatsApp to All Partners", type="primary", use_container_width=True):
+                    try:
+                        # Get all transaction partners
+                        partners = get_all_transaction_partners(family["id"])
+                        if not partners:
+                            st.warning("No reciprocity partners found to send to. (You must have exchanged contributions with families first)")
+                        else:
+                            partner_phones = [p["phone_number"] for p in partners if p.get("phone_number")]
+                            
+                            if not partner_phones:
+                                st.error("No valid phone numbers found in partner list.")
+                            else:
+                                # Show confirmation dialog
+                                st.info(f"📤 Sending WhatsApp message to {len(partner_phones)} partner(s)...")
+                                
+                                # Send broadcast
+                                sent_count, status_msg = broadcast_event_announcement(
+                                    family_phone=family["phone_number"],
+                                    family_name=family["husband_name"],
+                                    event_name=selected_evt["event_name"],
+                                    event_date=str(selected_evt["event_date"]),
+                                    event_place=selected_evt["event_place"],
+                                    event_location=selected_evt["event_location"] or "",
+                                    partner_phone_numbers=partner_phones,
+                                )
+                                
+                                if sent_count > 0:
+                                    st.success(status_msg)
+                                    st.balloons()
+                                else:
+                                    st.error(status_msg)
+                    except Exception as error:
+                        st.error(f"Error sending WhatsApp messages: {str(error)}")
+
+                st.divider()
+                st.markdown("#### Update / Reschedule an Existing Event")
+                
+                selected_evt_label_update = st.selectbox("Select Event to Update", list(event_options.keys()), key="update_event_select")
+                selected_evt_update = event_options[selected_evt_label_update]
 
                 with st.form("update_event_form"):
                     up_col1, up_col2 = st.columns(2)
                     with up_col1:
-                        up_event_name = st.text_input("Function Name", value=selected_evt["event_name"])
+                        up_event_name = st.text_input("Function Name", value=selected_evt_update["event_name"])
                         # Parse date
-                        evt_d = selected_evt["event_date"]
+                        evt_d = selected_evt_update["event_date"]
                         if isinstance(evt_d, str):
                             evt_d = datetime.datetime.strptime(evt_d, "%Y-%m-%d").date()
                         up_event_date = st.date_input("Reschedule Date", value=evt_d)
                     with up_col2:
-                        up_event_place = st.text_input("Venue / Mandapam", value=selected_evt["event_place"] or "")
-                        up_event_location = st.text_input("Location / City", value=selected_evt["event_location"] or "")
+                        up_event_place = st.text_input("Venue / Mandapam", value=selected_evt_update["event_place"] or "")
+                        up_event_location = st.text_input("Location / City", value=selected_evt_update["event_location"] or "")
 
                     update_evt_button = st.form_submit_button("Update Event Details", type="secondary")
 
                 if update_evt_button:
                     up_success, up_msg = update_event_by_host(
-                        event_id=selected_evt["event_id"],
+                        event_id=selected_evt_update["event_id"],
                         event_name=up_event_name.strip(),
                         event_date=up_event_date.strftime("%Y-%m-%d"),
                         event_place=up_event_place.strip(),
@@ -370,6 +444,48 @@ if "logged_in_family" in st.session_state:
             )
             partner_rows = get_my_partner_history(family["id"])
             if partner_rows:
+                summary_df = pd.DataFrame(partner_rows)
+                total_given = summary_df["total_given"].sum()
+                total_received = summary_df["total_received"].sum()
+                net_overall = total_given - total_received
+
+                st.markdown("#### 📊 At a Glance")
+                kpi1, kpi2, kpi3 = st.columns(3)
+                kpi1.metric("Total Given", f"₹{total_given:,.0f}")
+                kpi2.metric("Total Received", f"₹{total_received:,.0f}")
+                kpi3.metric(
+                    "Net Balance",
+                    f"₹{net_overall:,.0f}",
+                    delta=("You've given more" if net_overall > 0 else "You've received more" if net_overall < 0 else "Even"),
+                )
+
+                chart_col1, chart_col2 = st.columns([3, 2])
+                with chart_col1:
+                    st.markdown("**Given vs Received, by Family**")
+                    chart_df = summary_df.set_index("other_husband_name")[["total_given", "total_received"]]
+                    chart_df = chart_df.rename(columns={"total_given": "Given", "total_received": "Received"})
+                    st.bar_chart(chart_df, use_container_width=True)
+                with chart_col2:
+                    st.markdown("**Overall Split**")
+                    pie_df = pd.DataFrame(
+                        {"Type": ["Given", "Received"], "Amount": [total_given, total_received]}
+                    )
+                    st.altair_chart(
+                        {
+                            "mark": {"type": "arc", "innerRadius": 60},
+                            "encoding": {
+                                "theta": {"field": "Amount", "type": "quantitative"},
+                                "color": {"field": "Type", "type": "nominal"},
+                                "tooltip": [
+                                    {"field": "Type", "type": "nominal"},
+                                    {"field": "Amount", "type": "quantitative"},
+                                ],
+                            },
+                            "data": {"values": pie_df.to_dict("records")},
+                        },
+                        use_container_width=True,
+                    )
+
                 st.dataframe(
                     partner_rows,
                     use_container_width=True,
@@ -410,3 +526,4 @@ if "logged_in_family" in st.session_state:
         except Exception as error:
             st.error("Could not load this family's records.")
             st.code(str(error))
+
