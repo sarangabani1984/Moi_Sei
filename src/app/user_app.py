@@ -17,8 +17,16 @@ from db import (
     update_event_by_host,
     verify_password,
     get_all_transaction_partners,
+    search_contributions_by_amount,
+    search_family_contributions_many,
 )
 from notifications import broadcast_event_announcement
+from voice_ai import (
+    build_tamil_contribution_response,
+    parse_contribution_query_with_gpt,
+    text_to_speech_openai,
+    transcribe_audio_with_whisper,
+)
 
 
 st.set_page_config(page_title="Moi Sei Family Portal", page_icon="F", layout="wide")
@@ -88,11 +96,12 @@ if "logged_in_family" in st.session_state:
 
     st.divider()
 
-    tab_profile, tab_upcoming, tab_my_events, tab_history = st.tabs([
+    tab_profile, tab_upcoming, tab_my_events, tab_history, tab_voice = st.tabs([
         "👤 My Profile",
         "📅 Upcoming Partner Events",
         "📣 Schedule & Manage My Events",
         "📊 My Give & Take History",
+        "🎙️ AI Assistant",
     ])
 
     # -------------------------------------------------------------------------
@@ -526,4 +535,142 @@ if "logged_in_family" in st.session_state:
         except Exception as error:
             st.error("Could not load this family's records.")
             st.code(str(error))
+
+    # -------------------------------------------------------------------------
+    # TAB 4: Voice AI Assistant (scoped to this family's received contributions)
+    # -------------------------------------------------------------------------
+    with tab_voice:
+        st.subheader("My Voice Assistant")
+        st.caption(
+            "Ask in Tamil or English about contributions received by your family. "
+            "Other families' private records are not searched."
+        )
+
+        def reset_portal_voice():
+            st.session_state["portal_voice_generation"] = (
+                st.session_state.get("portal_voice_generation", 0) + 1
+            )
+            for key in (
+                "portal_voice_transcript",
+                "portal_voice_plan",
+                "portal_voice_results",
+                "portal_voice_response",
+                "portal_voice_audio",
+                "portal_voice_error",
+            ):
+                st.session_state.pop(key, None)
+
+        st.button(
+            "New question / Reset",
+            key="portal_voice_reset",
+            on_click=reset_portal_voice,
+            use_container_width=True,
+        )
+        voice_generation = st.session_state.get("portal_voice_generation", 0)
+        voice_recording = st.audio_input(
+            "Ask about contributions received by your family",
+            sample_rate=16000,
+            key=f"portal_voice_recording_{voice_generation}",
+        )
+        voice_typed_query = st.text_input(
+            "Or type your question",
+            placeholder="Who contributed more than 10000?",
+            key=f"portal_voice_text_{voice_generation}",
+        )
+
+        if st.button(
+            "Find my contribution",
+            type="primary",
+            key="portal_voice_find",
+            use_container_width=True,
+        ):
+            question = voice_typed_query.strip()
+            if voice_recording is not None:
+                with st.spinner("Converting speech to text..."):
+                    transcription_ok, transcription = transcribe_audio_with_whisper(
+                        voice_recording.getvalue()
+                    )
+                if transcription_ok:
+                    question = transcription.strip()
+                else:
+                    st.session_state["portal_voice_error"] = transcription
+
+            if not question:
+                st.session_state["portal_voice_error"] = (
+                    "Record a message or type a question."
+                )
+            else:
+                st.session_state["portal_voice_transcript"] = question
+                with st.spinner("Understanding your question..."):
+                    query_plan = parse_contribution_query_with_gpt(question)
+                if query_plan.get("error"):
+                    st.session_state["portal_voice_error"] = query_plan["error"]
+                else:
+                    st.session_state.pop("portal_voice_error", None)
+                    st.session_state["portal_voice_plan"] = query_plan
+                    if query_plan["query_type"] == "amount_filter":
+                        voice_results = search_contributions_by_amount(
+                            query_plan["amount"],
+                            query_plan["operator"],
+                            receiver_id=family["id"],
+                        )
+                    else:
+                        voice_results = search_family_contributions_many(
+                            query_plan.get(
+                                "husband_names", [query_plan["husband_name"]]
+                            ),
+                            query_plan["current_place"],
+                            receiver_id=family["id"],
+                        )
+                    st.session_state["portal_voice_results"] = voice_results
+                    visible_response = build_tamil_contribution_response(
+                        voice_results, query_plan
+                    )
+                    spoken_response = build_tamil_contribution_response(
+                        voice_results, query_plan, spoken=True
+                    )
+                    st.session_state["portal_voice_response"] = visible_response
+                    speech_ok, speech_audio = text_to_speech_openai(spoken_response)
+                    st.session_state["portal_voice_audio"] = (
+                        speech_audio if speech_ok else None
+                    )
+
+        if "portal_voice_transcript" in st.session_state:
+            st.markdown("**Recognized request**")
+            st.write(st.session_state["portal_voice_transcript"])
+        if "portal_voice_error" in st.session_state:
+            st.error(st.session_state["portal_voice_error"])
+        if "portal_voice_results" in st.session_state:
+            voice_results = st.session_state["portal_voice_results"]
+            st.metric("Matching people", len(voice_results))
+            if voice_results and st.session_state["portal_voice_plan"]["response_mode"] == "list":
+                st.dataframe(
+                    voice_results,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_order=[
+                        "husband_name",
+                        "wife_name",
+                        "current_place",
+                        "total_contributed",
+                        "contribution_count",
+                    ],
+                    column_config={
+                        "husband_name": "Husband Name",
+                        "wife_name": "Wife Name",
+                        "current_place": "Current Place",
+                        "total_contributed": st.column_config.NumberColumn(
+                            "Amount Received", format="₹%.2f"
+                        ),
+                        "contribution_count": "Contributions",
+                    },
+                )
+            st.markdown("**தமிழ் பதில்**")
+            st.write(st.session_state["portal_voice_response"])
+            if st.session_state.get("portal_voice_audio"):
+                st.audio(
+                    st.session_state["portal_voice_audio"],
+                    format="audio/mp3",
+                    autoplay=True,
+                )
 

@@ -4,6 +4,7 @@ import os
 import re
 import threading
 import urllib.parse
+from difflib import SequenceMatcher
 import streamlit as st
 
 # Check if psycopg2 is available for PostgreSQL (Supabase / Neon)
@@ -260,6 +261,151 @@ def search_families(search_text):
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
+def search_family_contributions(
+    husband_name, current_place, receiver_id=None, *, allow_fuzzy=True
+):
+    """Find contribution totals using safely bound husband-name and place filters."""
+    husband_name = husband_name.strip()
+    current_place = current_place.strip()
+    if not husband_name and not current_place:
+        return []
+
+    connection = get_connection()
+    cursor = connection.cursor()
+    name_pattern = f"%{husband_name}%"
+    place_pattern = f"%{current_place}%"
+    if is_postgres_mode():
+        cursor.execute(
+            """
+            SELECT u.id, u.husband_name, u.wife_name, u.current_place,
+                   COUNT(DISTINCT CASE WHEN je.entry_type = 'CONTRIBUTED'
+                                       THEN je.transaction_id END) AS contribution_count,
+                   COALESCE(SUM(CASE WHEN je.entry_type = 'CONTRIBUTED'
+                                     THEN je.amount ELSE 0 END), 0) AS total_contributed
+            FROM users u
+            LEFT JOIN journal_entries je ON je.user_id = u.id
+            WHERE u.is_active = TRUE
+              AND (%s = '' OR u.husband_name ILIKE %s OR u.search_alias ILIKE %s)
+              AND (%s = '' OR u.current_place ILIKE %s)
+                            AND (%s IS NULL OR EXISTS (
+                                    SELECT 1 FROM journal_entries received
+                                    WHERE received.transaction_id = je.transaction_id
+                                        AND received.user_id = %s
+                                        AND received.entry_type = 'RECEIVED'
+                            ))
+            GROUP BY u.id, u.husband_name, u.wife_name, u.current_place
+            ORDER BY u.husband_name;
+            """,
+                        (
+                                husband_name, name_pattern, name_pattern, current_place, place_pattern,
+                                receiver_id, receiver_id,
+                        ),
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT u.id, u.husband_name, u.wife_name, u.current_place,
+                   COUNT(DISTINCT CASE WHEN je.entry_type = 'CONTRIBUTED'
+                                       THEN je.transaction_id END) AS contribution_count,
+                   COALESCE(SUM(CASE WHEN je.entry_type = 'CONTRIBUTED'
+                                     THEN je.amount ELSE 0 END), 0) AS total_contributed
+            FROM dbo.users u
+            LEFT JOIN dbo.journal_entries je ON je.user_id = u.id
+            WHERE u.is_active = 1
+              AND (? = '' OR u.husband_name LIKE ? OR u.search_alias LIKE ?)
+              AND (? = '' OR u.current_place LIKE ?)
+                            AND (? IS NULL OR EXISTS (
+                                    SELECT 1 FROM dbo.journal_entries received
+                                    WHERE received.transaction_id = je.transaction_id
+                                        AND received.user_id = ?
+                                        AND received.entry_type = 'RECEIVED'
+                            ))
+            GROUP BY u.id, u.husband_name, u.wife_name, u.current_place
+            ORDER BY u.husband_name;
+            """,
+                        husband_name, name_pattern, name_pattern, current_place, place_pattern,
+                        receiver_id, receiver_id,
+        )
+    columns = [column[0] for column in cursor.description]
+    results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+    if results or not husband_name or not allow_fuzzy:
+        return results
+
+    if is_postgres_mode():
+        cursor.execute(
+            "SELECT husband_name FROM users WHERE is_active = TRUE"
+        )
+    else:
+        cursor.execute(
+            "SELECT husband_name FROM dbo.users WHERE is_active = 1"
+        )
+    candidate_names = [row[0] for row in cursor.fetchall() if row[0]]
+    closest_name = max(
+        candidate_names,
+        key=lambda name: SequenceMatcher(None, husband_name, name).ratio(),
+        default=None,
+    )
+    if closest_name is None:
+        return []
+    similarity = SequenceMatcher(None, husband_name, closest_name).ratio()
+    if similarity < 0.72:
+        return []
+    return search_family_contributions(
+        closest_name, current_place, receiver_id, allow_fuzzy=False
+    )
+
+
+def search_family_contributions_many(husband_names, current_place, receiver_id=None):
+    """Combine contribution matches for several spoken names without duplicates."""
+    combined = {}
+    for husband_name in husband_names:
+        for result in search_family_contributions(husband_name, current_place, receiver_id):
+            combined[result["id"]] = result
+    return sorted(combined.values(), key=lambda result: result["husband_name"])
+
+
+def search_contributions_by_amount(amount, operator, receiver_id=None):
+    """Return families with individual contributions matching an amount comparison."""
+    sql_operators = {
+        "eq": "=",
+        "gt": ">",
+        "gte": ">=",
+        "lt": "<",
+        "lte": "<=",
+    }
+    comparison = sql_operators.get(operator)
+    if comparison is None:
+        raise ValueError("Unsupported amount comparison.")
+
+    connection = get_connection()
+    cursor = connection.cursor()
+    placeholder = "%s" if is_postgres_mode() else "?"
+    table_prefix = "" if is_postgres_mode() else "dbo."
+    cursor.execute(
+        f"""
+        SELECT u.id, u.husband_name, u.wife_name, u.current_place,
+               COUNT(DISTINCT je.transaction_id) AS contribution_count,
+               SUM(je.amount) AS total_contributed
+        FROM {table_prefix}users u
+        JOIN {table_prefix}journal_entries je ON je.user_id = u.id
+        WHERE u.is_active = {"TRUE" if is_postgres_mode() else "1"}
+          AND je.entry_type = 'CONTRIBUTED'
+          AND je.amount {comparison} {placeholder}
+                    AND ({placeholder} IS NULL OR EXISTS (
+                            SELECT 1 FROM {table_prefix}journal_entries received
+                            WHERE received.transaction_id = je.transaction_id
+                                AND received.user_id = {placeholder}
+                                AND received.entry_type = 'RECEIVED'
+                    ))
+        GROUP BY u.id, u.husband_name, u.wife_name, u.current_place
+        ORDER BY u.husband_name;
+        """,
+                (amount, receiver_id, receiver_id),
+    )
+    columns = [column[0] for column in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
 def get_active_families_for_search():
     """Return active family choices for the staff searchable name field."""
     connection = get_connection()
@@ -267,7 +413,9 @@ def get_active_families_for_search():
     if is_postgres_mode():
         cursor.execute(
             """
-            SELECT id, husband_name, phone_number, place, search_alias
+                 SELECT id, husband_name, wife_name, husband_job, wife_job,
+                     phone_number, native_place, current_place, place,
+                     search_alias, others
             FROM users
             WHERE is_active = TRUE
             ORDER BY husband_name;
@@ -276,7 +424,9 @@ def get_active_families_for_search():
     else:
         cursor.execute(
             """
-            SELECT id, husband_name, phone_number, place, search_alias
+                 SELECT id, husband_name, wife_name, husband_job, wife_job,
+                     phone_number, native_place, current_place, place,
+                     search_alias, others
             FROM dbo.users
             WHERE is_active = 1
             ORDER BY husband_name;
@@ -338,13 +488,13 @@ def get_family(user_id):
     """Fetch one family's full profile by their permanent id, or None if not found."""
     sql_mssql = """
          SELECT id, phone_number, native_place, current_place, husband_name, husband_job,
-             wife_name, wife_job, place, others, family_deity, email, search_alias, password_hash, is_active
+             wife_name, wife_job, place, others, notes, family_deity, email, search_alias, password_hash, is_active
         FROM dbo.users
         WHERE id = ?
     """
     sql_pg = """
          SELECT id, phone_number, native_place, current_place, husband_name, husband_job,
-             wife_name, wife_job, place, others, family_deity, email, search_alias, password_hash, is_active
+             wife_name, wife_job, place, others, notes, family_deity, email, search_alias, password_hash, is_active
         FROM users
         WHERE id = %s
     """
@@ -417,7 +567,7 @@ def get_event_with_host(event_id):
     return fetch_one(sql_mssql, sql_pg, event_id)
 
 
-def create_family(phone_number, native_place, current_place, husband_name, husband_job, wife_name, wife_job, others, family_deity, email, search_alias, password):
+def create_family(phone_number, native_place, current_place, husband_name, husband_job, wife_name, wife_job, others, family_deity, email, search_alias, password, notes=""):
     """Insert a new family record and return its new permanent id."""
     connection = get_connection()
     cursor = connection.cursor()
@@ -426,8 +576,8 @@ def create_family(phone_number, native_place, current_place, husband_name, husba
             cursor.execute(
                 """
                 INSERT INTO users
-                    (phone_number, native_place, current_place, husband_name, husband_job, wife_name, wife_job, place, others, family_deity, email, search_alias, password_hash)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (phone_number, native_place, current_place, husband_name, husband_job, wife_name, wife_job, place, others, notes, family_deity, email, search_alias, password_hash)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id;
                 """,
                 (
@@ -440,6 +590,7 @@ def create_family(phone_number, native_place, current_place, husband_name, husba
                     wife_job or None,
                     "",  # place: empty for now
                     others or None,
+                    notes or None,
                     family_deity or None,
                     email or None,
                     search_alias or None,
@@ -451,9 +602,9 @@ def create_family(phone_number, native_place, current_place, husband_name, husba
             cursor.execute(
                 """
                 INSERT INTO dbo.users
-                    (phone_number, native_place, current_place, husband_name, husband_job, wife_name, wife_job, place, others, family_deity, email, search_alias, password_hash)
+                    (phone_number, native_place, current_place, husband_name, husband_job, wife_name, wife_job, place, others, notes, family_deity, email, search_alias, password_hash)
                 OUTPUT INSERTED.id
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     phone_number,
@@ -465,6 +616,7 @@ def create_family(phone_number, native_place, current_place, husband_name, husba
                     wife_job or None,
                     "",  # place: empty for now
                     others or None,
+                    notes or None,
                     family_deity or None,
                     email or None,
                     search_alias or None,
@@ -497,17 +649,18 @@ def set_family_password(user_id, password):
 
 def update_family_profile(
     user_id,
-    native_place,
-    current_place,
     husband_name,
-    husband_job,
-    wife_name,
-    wife_job,
-    place,
-    others,
-    family_deity,
-    email,
-    search_alias,
+    native_place="",
+    current_place="",
+    husband_job="",
+    wife_name="",
+    wife_job="",
+    place="",
+    others="",
+    notes="",
+    family_deity="",
+    email="",
+    search_alias="",
 ):
     """Update editable profile fields while keeping the login phone unchanged."""
     connection = get_connection()
@@ -518,12 +671,12 @@ def update_family_profile(
                 """
                 UPDATE users
                 SET native_place = %s, current_place = %s, husband_name = %s, husband_job = %s,
-                    wife_name = %s, wife_job = %s, place = %s, others = %s,
+                    wife_name = %s, wife_job = %s, place = %s, others = %s, notes = %s,
                     family_deity = %s, email = %s, search_alias = %s, updated_at = NOW()
                 WHERE id = %s AND is_active = TRUE
                 """,
                 (native_place or None, current_place or None, husband_name, husband_job or None,
-                 wife_name or None, wife_job or None, place or None, others or None,
+                 wife_name or None, wife_job or None, place or None, others or None, notes or None,
                  family_deity or None, email or None, search_alias or None, user_id),
             )
         else:
@@ -531,12 +684,12 @@ def update_family_profile(
                 """
                 UPDATE dbo.users
                 SET native_place = ?, current_place = ?, husband_name = ?, husband_job = ?,
-                    wife_name = ?, wife_job = ?, place = ?, others = ?,
+                    wife_name = ?, wife_job = ?, place = ?, others = ?, notes = ?,
                     family_deity = ?, email = ?, search_alias = ?, updated_at = SYSDATETIME()
                 WHERE id = ? AND is_active = 1
                 """,
                 native_place or None, current_place or None, husband_name, husband_job or None,
-                wife_name or None, wife_job or None, place or None, others or None,
+                wife_name or None, wife_job or None, place or None, others or None, notes or None,
                 family_deity or None, email or None, search_alias or None, user_id,
             )
         if cursor.rowcount != 1:
@@ -615,6 +768,59 @@ def process_contribution(contributor_id, receiver_id, event_id, amount):
             )
         connection.commit()
         return True, "Contribution recorded successfully."
+    except Exception as error:
+        connection.rollback()
+        return False, str(error)
+
+
+def get_last_contribution(contributor_id, event_id):
+    """Get the most recent contribution by a contributor for an event."""
+    connection = get_connection()
+    cursor = connection.cursor()
+    try:
+        if is_postgres_mode():
+            sql = """
+                SELECT je_id, je_amount, je_date
+                FROM journal_entries
+                WHERE je_contributor = %s AND je_event = %s AND is_active = TRUE
+                ORDER BY je_date DESC
+                LIMIT 1;
+            """
+            cursor.execute(sql, (contributor_id, event_id))
+        else:
+            sql = """
+                SELECT TOP 1 je_id, je_amount, je_date
+                FROM dbo.journal_entries
+                WHERE je_contributor = ? AND je_event = ? AND is_active = 1
+                ORDER BY je_date DESC;
+            """
+            cursor.execute(sql, (contributor_id, event_id))
+        
+        result = cursor.fetchone()
+        if result:
+            if is_postgres_mode():
+                return {"id": result[0], "amount": result[1], "date": result[2]}
+            else:
+                return {"id": result[0], "amount": result[1], "date": result[2]}
+        return None
+    except Exception as error:
+        return None
+
+
+def delete_contribution(contribution_id):
+    """Delete/undo a contribution by marking it as inactive."""
+    connection = get_connection()
+    cursor = connection.cursor()
+    try:
+        if is_postgres_mode():
+            sql = "UPDATE journal_entries SET is_active = FALSE WHERE je_id = %s;"
+            cursor.execute(sql, (contribution_id,))
+        else:
+            sql = "UPDATE dbo.journal_entries SET is_active = 0 WHERE je_id = ?;"
+            cursor.execute(sql, (contribution_id,))
+        
+        connection.commit()
+        return True, "Contribution undone successfully."
     except Exception as error:
         connection.rollback()
         return False, str(error)

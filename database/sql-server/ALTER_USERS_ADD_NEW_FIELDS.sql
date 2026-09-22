@@ -8,7 +8,8 @@ ADD
     native_place NVARCHAR(MAX) NULL,
     current_place NVARCHAR(MAX) NULL,
     wife_job NVARCHAR(MAX) NULL,
-    others NVARCHAR(MAX) NULL;
+    others NVARCHAR(MAX) NULL,
+    notes NVARCHAR(MAX) NULL;
 
 -- Verify the columns were added
 SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
