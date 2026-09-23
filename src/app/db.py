@@ -406,6 +406,7 @@ def search_contributions_by_amount(amount, operator, receiver_id=None):
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
+@st.cache_data(ttl=60)  # Cache for 60 seconds to avoid repeated DB queries during fast reruns
 def get_active_families_for_search():
     """Return active family choices for the staff searchable name field."""
     connection = get_connection()
@@ -518,6 +519,7 @@ def get_event(event_id):
     return fetch_one(sql_mssql, sql_pg, event_id)
 
 
+@st.cache_data(ttl=60)  # Cache for 60 seconds - events don't change frequently
 def get_active_events():
     """Return active events for the staff contribution entry screen."""
     connection = get_connection()

@@ -26,6 +26,76 @@ from db import (
 from notifications import send_contribution_whatsapp, broadcast_event_announcement, send_green_api_whatsapp
 
 
+@st.fragment  # ⚡ PERFORMANCE: Partial rerun for denomination inputs (avoids full-page rerun on Tab)
+def render_contribution_form(denomination_col, selected_event, existing_family_id):
+    """Render the cash denomination and amount input form.
+    Using @st.fragment prevents full-page reruns when Tab is pressed in denomination fields.
+    """
+    with denomination_col:
+        with st.container():
+            # Highlight if just saved a family
+            show_amount_section = st.session_state.pop("show_amount_section", False)
+            if show_amount_section:
+                st.markdown('<div style="background-color: #90EE90; padding: 12px; border-radius: 8px; margin-bottom: 10px;"><strong>✨ Now enter amount (₹) and use Tab ↹ to navigate denominations</strong></div>', unsafe_allow_html=True)
+            
+            st.markdown('<div class="box-container-dark"><div class="box-title">💰 Cash Denomination</div>', unsafe_allow_html=True)
+            
+            # Amount field moved inside box for header alignment
+            contribution_amount = st.number_input(
+                "Amount *",
+                min_value=0.01,
+                step=50.0,
+                format="%.2f",
+                key="contribution_amount",
+            )
+            if st.session_state.pop("focus_contribution_amount", False):
+                focus_parent_element('input[aria-label="Amount *"]')
+        
+        st.caption("Enter note counts (use Tab ↹ to navigate).")
+        # Setup Tab navigation from Amount field to first denomination
+        setup_tab_from_amount_to_denominations()
+        
+        denominations = (1000, 500, 200, 100, 50, 20, 10)
+        denomination_counts = {}
+        denomination_subtotals = {}
+        
+        for denomination in denominations:
+            denom_row = st.columns([0.8, 0.7, 0.9])
+            with denom_row[0]:
+                st.markdown(f"**₹{denomination}**")
+            with denom_row[1]:
+                note_count = st.number_input(
+                    "Count",
+                    min_value=0,
+                    step=1,
+                    value=0,
+                    label_visibility="collapsed",
+                    key=f"contribution_denomination_{denomination}",
+                )
+            denomination_counts[denomination] = note_count
+            denomination_subtotals[denomination] = denomination * note_count
+            with denom_row[2]:
+                st.caption(f"₹{denomination_subtotals[denomination]:,.2f}")
+
+        denomination_total = sum(
+            denomination * note_count
+            for denomination, note_count in denomination_counts.items()
+        )
+        note_count_total = sum(denomination_counts.values())
+        denomination_matches = abs(float(contribution_amount) - float(denomination_total)) < 0.001
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Return values for parent scope to use
+        return {
+            "contribution_amount": contribution_amount,
+            "denomination_counts": denomination_counts,
+            "denomination_total": denomination_total,
+            "note_count_total": note_count_total,
+            "denomination_matches": denomination_matches,
+        }
+
+
 def build_quick_paste_suggestions(search_term, families):
     """Return matching family options plus a free-text new-user option."""
     search_term = search_term.strip()
@@ -1493,62 +1563,18 @@ if contributor and selected_event:
         else:
             denomination_col.error("No other families available to receive.")
 
-denominations = (1000, 500, 200, 100, 50, 20, 10)
-denomination_counts = {}
-denomination_subtotals = {}
+# ⚡ CALL FRAGMENT: Render contribution form with partial reruns for Tab key performance
+contribution_data = render_contribution_form(denomination_col, selected_event, existing_family_id)
 
+if contribution_data:
+    contribution_amount = contribution_data["contribution_amount"]
+    denomination_counts = contribution_data["denomination_counts"]
+    denomination_total = contribution_data["denomination_total"]
+    note_count_total = contribution_data["note_count_total"]
+    denomination_matches = contribution_data["denomination_matches"]
 
-
-with denomination_col:
-        with st.container():
-            # Highlight if just saved a family
-            show_amount_section = st.session_state.pop("show_amount_section", False)
-            if show_amount_section:
-                st.markdown('<div style="background-color: #90EE90; padding: 12px; border-radius: 8px; margin-bottom: 10px;"><strong>✨ Now enter amount (₹) and use Tab ↹ to navigate denominations</strong></div>', unsafe_allow_html=True)
-            
-            st.markdown('<div class="box-container-dark"><div class="box-title">💰 Cash Denomination</div>', unsafe_allow_html=True)
-            
-            # Amount field moved inside box for header alignment
-            contribution_amount = st.number_input(
-                "Amount *",
-                min_value=0.01,
-                step=50.0,
-                format="%.2f",
-                key="contribution_amount",
-            )
-            if st.session_state.pop("focus_contribution_amount", False):
-                focus_parent_element('input[aria-label="Amount *"]')
-        
-        st.caption("Enter note counts (use Tab ↹ to navigate).")
-        # Setup Tab navigation from Amount field to first denomination
-        setup_tab_from_amount_to_denominations()
-        
-        for denomination in denominations:
-            denom_row = st.columns([0.8, 0.7, 0.9])
-            with denom_row[0]:
-                st.markdown(f"**₹{denomination}**")
-            with denom_row[1]:
-                note_count = st.number_input(
-                    "Count",
-                    min_value=0,
-                    step=1,
-                    value=0,
-                    label_visibility="collapsed",
-                    key=f"contribution_denomination_{denomination}",
-                )
-            denomination_counts[denomination] = note_count
-            denomination_subtotals[denomination] = denomination * note_count
-            with denom_row[2]:
-                st.caption(f"₹{denomination_subtotals[denomination]:,.2f}")
-
-        denomination_total = sum(
-            denomination * note_count
-            for denomination, note_count in denomination_counts.items()
-        )
-        note_count_total = sum(denomination_counts.values())
-        denomination_matches = abs(float(contribution_amount) - float(denomination_total)) < 0.001
-
-        # Status message and button BELOW denomination
+    # Status message and button BELOW denomination (OUTSIDE fragment for control)
+    with denomination_col:
         st.markdown("---")
         status_msg = f"**Notes:** {note_count_total} | **Cash:** ₹{denomination_total:,.2f}"
         st.write(status_msg)
