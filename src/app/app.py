@@ -322,85 +322,77 @@ def install_contribution_save_shortcut():
 
 
 def install_focus_paste_details_shortcut():
-    """Bind Ctrl+D to clear the form and prepare for next entry.
+    """Bind Ctrl+D and Ctrl+Shift+T to form reset and Tanglish toggle.
     
-    Since st_searchbox is a custom component that's hard to focus with raw JavaScript,
-    we'll use a session_state flag instead and handle the reset in Python.
+    Ctrl+D: Clears the form and prepares for next entry
+    Ctrl+Shift+T: Toggles between English and Tanglish input mode
     """
     components.html(
         """
         <script>
-        console.log('🔧 Ctrl+D shortcut handler installed');
+        console.log('🔧 Keyboard shortcuts installed (Ctrl+D, Ctrl+Shift+T)');
         
         const parentWindow = window.parent;
-        if (parentWindow.__moiSeiFocusPasteHandler) {
+        if (parentWindow.__moiSeiKeyboardHandler) {
             parentWindow.document.removeEventListener(
-                "keydown", parentWindow.__moiSeiFocusPasteHandler
+                "keydown", parentWindow.__moiSeiKeyboardHandler
             );
-            console.log('Removed old Ctrl+D handler');
+            console.log('Removed old keyboard handler');
         }
         
-        parentWindow.__moiSeiFocusPasteHandler = (event) => {
-            // Check for Ctrl+D (or Cmd+D on Mac)
-            if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "d") {
+        parentWindow.__moiSeiKeyboardHandler = (event) => {
+            // Check for Ctrl+D or Ctrl+Shift+T (or Cmd on Mac)
+            const isCtrlOrCmd = event.ctrlKey || event.metaKey;
+            const key = event.key.toLowerCase();
+            const hasShift = event.shiftKey;
+            
+            if (!isCtrlOrCmd) {
                 return;
             }
             
-            console.log('✅ Ctrl+D pressed - triggering form reset');
-            event.preventDefault();
-            
-            // Find and trigger the hidden "Reset for Next Entry" button
-            const buttons = [...parentWindow.document.querySelectorAll("button")];
-            const resetButton = buttons.find(button =>
-                button.innerText.includes("Reset for Next Entry") || 
-                button.innerText.includes("Reset") ||
-                button.getAttribute("data-testid") === "reset-form-button"
-            );
-            
-            if (resetButton) {
-                console.log('✅ Found reset button, clicking it');
-                resetButton.click();
-                console.log('✅ Reset button clicked - form should clear and focus Paste box');
-            } else {
-                console.log('⚠️ Could not find reset button');
-                // Fallback: try to focus the Paste details input directly
-                let pasteInput = parentWindow.document.querySelector(
-                    'input[placeholder*="Type a name"]'
-                );
-                if (!pasteInput) {
-                    pasteInput = parentWindow.document.querySelector(
-                        '[data-testid*="searchbox"] input'
-                    );
-                }
-                if (!pasteInput) {
-                    const allInputs = parentWindow.document.querySelectorAll('input');
-                    for (let inp of allInputs) {
-                        if ((inp.placeholder || '').includes('Type a name') || 
-                            (inp.placeholder || '').includes('place, phone')) {
-                            pasteInput = inp;
-                            break;
-                        }
-                    }
-                }
+            // Ctrl+D
+            if (key === "d") {
+                event.preventDefault();
+                console.log('✅ Ctrl+D pressed - triggering form reset');
                 
-                if (pasteInput && pasteInput.offsetParent !== null) {
-                    console.log('✅ Found paste input, focusing');
-                    parentWindow.scrollTo({top: 0, behavior: 'smooth'});
-                    setTimeout(() => {
-                        pasteInput.focus();
-                        pasteInput.click();
-                        console.log('✅ Focused on Paste details input');
-                    }, 300);
+                const buttons = [...parentWindow.document.querySelectorAll("button")];
+                const resetButton = buttons.find(button =>
+                    button.innerText.includes("Reset for Next Entry") || 
+                    button.innerText.includes("Reset") ||
+                    button.getAttribute("data-testid") === "reset-form-button"
+                );
+                
+                if (resetButton) {
+                    console.log('✅ Found reset button, clicking it');
+                    resetButton.click();
                 } else {
-                    console.log('⚠️ Could not find paste input to focus');
+                    console.log('⚠️ Could not find reset button');
+                }
+            } 
+            // Ctrl+Shift+T
+            else if (key === "t" && hasShift) {
+                event.preventDefault();
+                console.log('✅ Ctrl+Shift+T pressed - toggling Tanglish mode');
+                
+                const buttons = [...parentWindow.document.querySelectorAll("button")];
+                const tanglishButton = buttons.find(button =>
+                    button.innerText.includes("Toggle Tanglish Mode") || 
+                    button.getAttribute("data-testid") === "tanglish-toggle-button"
+                );
+                
+                if (tanglishButton) {
+                    console.log('✅ Found Tanglish toggle button, clicking it');
+                    tanglishButton.click();
+                } else {
+                    console.log('⚠️ Could not find Tanglish toggle button');
                 }
             }
         };
         
         parentWindow.document.addEventListener(
-            "keydown", parentWindow.__moiSeiFocusPasteHandler
+            "keydown", parentWindow.__moiSeiKeyboardHandler
         );
-        console.log('✅ Ctrl+D listener attached to document');
+        console.log('✅ Keyboard listeners (Ctrl+D, Ctrl+Shift+T) attached');
         </script>
         """,
         height=0,
@@ -429,6 +421,19 @@ def require_admin_login():
         st.rerun()
 
 
+def _get_credential(key: str, default: str = "") -> str:
+    """
+    Retrieves a configuration credential from Streamlit secrets or environment variables.
+    Used for cloud-safe credential access (Streamlit Cloud secrets + environment variables).
+    """
+    try:
+        if hasattr(st, "secrets") and key in st.secrets:
+            return str(st.secrets[key])
+    except Exception:
+        pass
+    return os.getenv(key, default)
+
+
 def show_whatsapp_test_panel():
     """Test WhatsApp delivery to any phone number."""
     with st.sidebar:
@@ -455,8 +460,8 @@ def show_whatsapp_test_panel():
             else:
                 try:
                     success, msg = send_green_api_whatsapp(
-                        id_instance=st.secrets.get("GREEN_API_ID_INSTANCE", ""),
-                        api_token=st.secrets.get("GREEN_API_TOKEN_INSTANCE", ""),
+                        id_instance=_get_credential("GREEN_API_ID_INSTANCE", ""),
+                        api_token=_get_credential("GREEN_API_TOKEN_INSTANCE", ""),
                         phone_number=test_phone,
                         message_text=test_message,
                         default_country_code="+91"
@@ -761,25 +766,25 @@ st.markdown("""
         padding-bottom: 0.45rem;
     }
     .box-container {
-        border: 2px solid #d4a5d4;
+        border: 2px solid #0e8b8e;
         border-radius: 12px;
         padding: 20px 18px;
-        background: linear-gradient(135deg, #f9f5fb 0%, #faf8fc 100%);
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.08);
+        background: linear-gradient(135deg, #252f3d 0%, #2d3e50 100%);
+        box-shadow: 0 4px 12px rgba(14, 139, 142, 0.2);
         margin: 0 0 0 0;
     }
     .box-container-dark {
-        border: 2px solid #d4a5d4;
+        border: 2px solid #0e8b8e;
         border-radius: 12px;
         padding: 20px 18px;
-        background: linear-gradient(135deg, #fef9f3 0%, #fffbf7 100%);
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.08);
+        background: linear-gradient(135deg, #252f3d 0%, #2d3e50 100%);
+        box-shadow: 0 4px 12px rgba(14, 139, 142, 0.2);
     }
     .box-title {
         font-size: 1.2rem;
         font-weight: 700;
-        color: #000000;
-        background-color: #f4b942;
+        color: #ffffff;
+        background-color: #0e8b8e;
         padding: 6px 12px;
         margin: -20px -18px 8px -18px;
         border-radius: 10px 10px 0 0;
@@ -846,6 +851,10 @@ for denom in [1000, 500, 200, 100, 50, 20, 10]:
     denom_key = f"contribution_denomination_{denom}"
     if denom_key not in st.session_state:
         st.session_state[denom_key] = 0
+
+# Initialize Tanglish mode (False = English, True = Tanglish/auto-convert)
+if "tanglish_mode" not in st.session_state:
+    st.session_state["tanglish_mode"] = False
 
 # Initialize contribution_amount early (before any widgets that use it)
 initialize_contribution_amount()
@@ -1288,10 +1297,6 @@ if not st.session_state.get("group_mode", False):
     # ====== COLUMN 1: FAMILY DETAILS ======
     with family_col:
         st.markdown('<div class="box-container"><div class="box-title">📋 குடும்ப விவரங்கள்</div>', unsafe_allow_html=True)
-        st.caption("Search or add family.")
-        
-        if st.button("➕ New Family", type="secondary", use_container_width=True):
-            st.rerun()
 
         # ============ ORDERED FIELDS: 2-COLUMN LAYOUT ============
         left_col, right_col = st.columns(2, gap="medium")
@@ -1444,8 +1449,8 @@ if not st.session_state.get("group_mode", False):
                             f"Moi Sei Admin"
                         )
                         whatsapp_success, whatsapp_msg = send_green_api_whatsapp(
-                            id_instance=st.secrets.get("GREEN_API_ID_INSTANCE", ""),
-                            api_token=st.secrets.get("GREEN_API_TOKEN_INSTANCE", ""),
+                            id_instance=_get_credential("GREEN_API_ID_INSTANCE", ""),
+                            api_token=_get_credential("GREEN_API_TOKEN_INSTANCE", ""),
                             phone_number=phone_number.strip(),
                             message_text=welcome_msg
                         )
@@ -1637,5 +1642,6 @@ with denomination_col:
             st.rerun()
         
         install_contribution_save_shortcut()
+        install_focus_paste_details_shortcut()
         st.markdown('</div>', unsafe_allow_html=True)
 
