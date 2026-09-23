@@ -56,8 +56,6 @@ def render_contribution_form(denomination_col, selected_event, existing_family_i
         setup_tab_from_amount_to_denominations()
         
         denominations = (1000, 500, 200, 100, 50, 20, 10)
-        denomination_counts = {}
-        denomination_subtotals = {}
         
         for denomination in denominations:
             denom_row = st.columns([0.8, 0.7, 0.9])
@@ -72,14 +70,19 @@ def render_contribution_form(denomination_col, selected_event, existing_family_i
                     label_visibility="collapsed",
                     key=f"contribution_denomination_{denomination}",
                 )
-            denomination_counts[denomination] = note_count
-            denomination_subtotals[denomination] = denomination * note_count
             with denom_row[2]:
-                st.caption(f"₹{denomination_subtotals[denomination]:,.2f}")
+                subtotal = denomination * note_count
+                st.caption(f"₹{subtotal:,.2f}")
 
+        # ✅ FIX: Read actual denomination counts from session state (not local dict)
+        denomination_counts = {
+            denom: st.session_state.get(f"contribution_denomination_{denom}", 0)
+            for denom in denominations
+        }
+        
         denomination_total = sum(
-            denomination * note_count
-            for denomination, note_count in denomination_counts.items()
+            denom * count
+            for denom, count in denomination_counts.items()
         )
         note_count_total = sum(denomination_counts.values())
         denomination_matches = abs(float(contribution_amount) - float(denomination_total)) < 0.001
