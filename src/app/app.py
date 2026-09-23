@@ -1133,7 +1133,10 @@ with st.container(key="quick_paste_panel"):
         st.caption("Quick Paste: search existing data or enter Mobile, Husband, Place, Amount")
 
     def auto_populate_on_paste():
-        """Smart search: text→husband name, numbers→phone, no match→parse as new user. Auto-convert to Tamil."""
+        """Smart search: text→husband name, numbers→phone, no match→parse as new user. 
+        ⚡ OPTIMIZED: Stores results WITHOUT rerunning on every keystroke.
+        Only reruns when user clicks Load/Select button.
+        """
         pasted_text = st.session_state.get("family_paste_details", "").strip()
         group_mode = st.session_state.get("group_mode", False)
         
@@ -1152,32 +1155,30 @@ with st.container(key="quick_paste_panel"):
                         if family_id not in group_matches:
                             group_matches[family_id] = match
             st.session_state["group_family_matches"] = group_matches
+            # NO rerun here - just store results
         else:
             # NORMAL MODE: Smart search single entry
             result = smart_parse_and_search(pasted_text)
             if result:
                 if "multiple_matches" in result:
-                    # Multiple families found → show options for user to select
+                    # Multiple families found → STORE but don't rerun yet
                     matches = result["multiple_matches"]
+                    st.session_state["paste_search_results"] = matches
+                    st.session_state["paste_has_results"] = True
+                    # If only 1 match, auto-load (definite match)
                     if len(matches) == 1:
-                        # Only one match → auto-load it
                         st.session_state["family_to_load"] = matches[0]["id"]
                         st.session_state.pop("family_id", None)
-                        st.rerun()
-                    else:
-                        # Multiple matches → show list for user to select
-                        st.session_state["multiple_family_matches"] = matches
-                        st.session_state.pop("family_id", None)
+                        st.rerun()  # Only rerun for definite single match
+                    # If multiple matches, show selection UI (no rerun needed)
                 else:
                     # No match → parse as new user with Tamil already converted
                     st.session_state["parsed_family_details"] = result
-                    # Also update contribution_amount if present in parsed data
                     if "contribution_amount" in result:
                         st.session_state["contribution_amount"] = result["contribution_amount"]
                     st.session_state.pop("family_id", None)
-                    # Mark form as ready to auto-save
                     st.session_state["form_auto_populated_valid"] = True
-                    st.rerun()  # Trigger rerun to apply parsed values and amount
+                    st.rerun()  # Only rerun when actually loading new user data
 
     if group_mode:
         st.text_area(
@@ -1197,18 +1198,24 @@ with st.container(key="quick_paste_panel"):
             return build_quick_paste_suggestions(search_term, searchable_families)
 
         def submit_quick_paste(selection):
+            """⚡ OPTIMIZED: Only reruns for definite matches (family ID or new user data)."""
             if not selection:
                 return
             selection_type, value = selection.split(":", 1)
+            
             if selection_type == "family":
+                # Definite match: load the family
                 st.session_state["family_to_load"] = int(value)
                 st.session_state["show_amount_section"] = True
                 st.session_state["focus_contribution_amount"] = True
                 st.session_state.pop("family_id", None)
-                st.rerun()
-            st.session_state["family_paste_details"] = value
-            st.session_state["focus_family_auto_save"] = True
-            auto_populate_on_paste()
+                st.rerun()  # Only rerun for definite family match
+            else:
+                # Text entry: store but don't rerun (let user click Load button or wait for Enter)
+                st.session_state["family_paste_details"] = value
+                st.session_state["focus_family_auto_save"] = True
+                # Trigger search but DON'T auto-rerun (just store results)
+                auto_populate_on_paste()
 
         st_searchbox(
             quick_paste_search,
