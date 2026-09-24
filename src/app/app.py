@@ -27,11 +27,8 @@ from db import (
 from notifications import send_contribution_whatsapp, broadcast_event_announcement, send_green_api_whatsapp
 
 
-@st.fragment  # ⚡ PERFORMANCE: Partial rerun for denomination inputs (avoids full-page rerun on Tab)
 def render_contribution_form(denomination_col, selected_event, existing_family_id):
-    """Render the cash denomination and amount input form.
-    Using @st.fragment prevents full-page reruns when Tab is pressed in denomination fields.
-    """
+    """Render the cash denomination and amount input form."""
     with denomination_col:
         with st.container():
             # Highlight if just saved a family
