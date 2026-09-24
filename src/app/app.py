@@ -35,72 +35,75 @@ def render_contribution_form(denomination_col, selected_event, existing_family_i
             show_amount_section = st.session_state.pop("show_amount_section", False)
             if show_amount_section:
                 st.markdown('<div style="background-color: #90EE90; padding: 12px; border-radius: 8px; margin-bottom: 10px;"><strong>✨ Now enter amount (₹) and use Tab ↹ to navigate denominations</strong></div>', unsafe_allow_html=True)
-            
+
             st.markdown('<div class="box-container-dark"><div class="box-title">💰 Cash Denomination</div>', unsafe_allow_html=True)
-            
-            # Amount field moved inside box for header alignment
-            contribution_amount = st.number_input(
-                "Amount *",
-                min_value=0.01,
-                step=50.0,
-                format="%.2f",
-                key="contribution_amount",
-            )
-            if st.session_state.pop("focus_contribution_amount", False):
-                focus_parent_element('input[aria-label="Amount *"]')
-        
-        st.caption("Enter note counts (use Tab ↹ to navigate).")
-        # Setup Tab navigation from Amount field to first denomination
-        setup_tab_from_amount_to_denominations()
-        
-        denominations = (1000, 500, 200, 100, 50, 20, 10)
-        
-        for denomination in denominations:
-            denom_row = st.columns([0.8, 0.7, 0.9])
-            with denom_row[0]:
-                st.markdown(f"**₹{denomination}**")
-            with denom_row[1]:
-                note_count = st.number_input(
-                    "Count",
-                    min_value=0,
-                    step=1,
-                    value=0,
-                    label_visibility="collapsed",
-                    key=f"contribution_denomination_{denomination}",
+
+            # OPTIMIZATION #2: treat the amount + denomination rows as one deliberate entry form.
+            # This keeps fast data entry responsive because Streamlit only recalculates when the user
+            # chooses to submit this form rather than on every keystroke.
+            with st.form(f"contribution_entry_{existing_family_id or 'new'}", clear_on_submit=False):
+                contribution_amount = st.number_input(
+                    "Amount *",
+                    min_value=0.01,
+                    step=50.0,
+                    format="%.2f",
+                    key="contribution_amount",
                 )
-            with denom_row[2]:
-                subtotal = denomination * note_count
-                st.caption(f"₹{subtotal:,.2f}")
+                if st.session_state.pop("focus_contribution_amount", False):
+                    focus_parent_element('input[aria-label="Amount *"]')
 
-        # ✅ FIX: Read actual denomination counts from session state (not local dict)
-        denomination_counts = {
-            denom: st.session_state.get(f"contribution_denomination_{denom}", 0)
-            for denom in denominations
-        }
-        
-        denomination_total = sum(
-            denom * count
-            for denom, count in denomination_counts.items()
-        )
-        note_count_total = sum(denomination_counts.values())
+                st.caption("Enter note counts.")
+                denominations = (1000, 500, 200, 100, 50, 20, 10)
 
-        try:
-            contribution_decimal = Decimal(str(contribution_amount)).quantize(Decimal("0.01"))
-            denomination_decimal = Decimal(str(denomination_total)).quantize(Decimal("0.01"))
-            denomination_matches = contribution_decimal == denomination_decimal
-        except (InvalidOperation, ValueError):
-            denomination_matches = False
+                for denomination in denominations:
+                    denom_row = st.columns([0.8, 0.7, 0.9])
+                    with denom_row[0]:
+                        st.markdown(f"**₹{denomination}**")
+                    with denom_row[1]:
+                        note_count = st.number_input(
+                            "Count",
+                            min_value=0,
+                            step=1,
+                            value=0,
+                            label_visibility="collapsed",
+                            key=f"contribution_denomination_{denomination}",
+                        )
+                    with denom_row[2]:
+                        subtotal = denomination * note_count
+                        st.caption(f"₹{subtotal:,.2f}")
 
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        # Return values for parent scope to use
-        return {
-            "contribution_amount": contribution_amount,
-            "denomination_counts": denomination_counts,
-            "denomination_total": denomination_total,
-            "note_count_total": note_count_total,
-            "denomination_matches": denomination_matches,
-        }
+                # ✅ FIX: Read actual denomination counts from session state (not local dict)
+                denomination_counts = {
+                    denom: st.session_state.get(f"contribution_denomination_{denom}", 0)
+                    for denom in denominations
+                }
+
+                denomination_total = sum(
+                    denom * count
+                    for denom, count in denomination_counts.items()
+                )
+                note_count_total = sum(denomination_counts.values())
+
+                try:
+                    contribution_decimal = Decimal(str(contribution_amount)).quantize(Decimal("0.01"))
+                    denomination_decimal = Decimal(str(denomination_total)).quantize(Decimal("0.01"))
+                    denomination_matches = contribution_decimal == denomination_decimal
+                except (InvalidOperation, ValueError):
+                    denomination_matches = False
+
+                # Small explicit submit button inside the form to keep the flow controlled.
+                st.form_submit_button("Refresh totals", use_container_width=True)
+
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            # Return values for parent scope to use
+            return {
+                "contribution_amount": contribution_amount,
+                "denomination_counts": denomination_counts,
+                "denomination_total": denomination_total,
+                "note_count_total": note_count_total,
+                "denomination_matches": denomination_matches,
+            }
 
 
 def build_quick_paste_suggestions(search_term, families):
@@ -941,9 +944,12 @@ initialize_contribution_amount()
 # ============================================================================
 with st.sidebar:
     st.markdown("## மொய்செய்")
-    
-    # Event Details at the top
-    events = get_active_events()
+
+    # OPTIMIZATION #5: keep the active event list in session state so a fast collection session does not
+    # repeatedly hit the DB or rebuild the same options on every rerun.
+    if "active_events_cache" not in st.session_state:
+        st.session_state["active_events_cache"] = get_active_events()
+    events = st.session_state["active_events_cache"]
     event_options = {
         f"{event['event_id']} | {event['event_name']} | {event['event_date']}": event
         for event in events
@@ -1193,15 +1199,21 @@ with st.container(key="quick_paste_panel"):
             key="family_paste_details",
             placeholder="Enter one phone number or name per line",
             height=100,
-            on_change=auto_populate_on_paste,
         )
-        # Add Load Details button for manual trigger (Tab doesn't auto-trigger on_change)
+        # OPTIMIZATION #3: keep this as a manual action instead of firing lookup logic on every keystroke.
         if st.button("⏎ Load Details", type="secondary", use_container_width=True):
             auto_populate_on_paste()
     else:
-        searchable_families = get_active_families_for_search()
+        # OPTIMIZATION #4: keep the family search dataset in session state for the current session,
+        # so the app does not reload the full list while the user is typing.
+        if "searchable_families_cache" not in st.session_state:
+            st.session_state["searchable_families_cache"] = get_active_families_for_search()
+        searchable_families = st.session_state["searchable_families_cache"]
 
         def quick_paste_search(search_term):
+            search_term = (search_term or "").strip()
+            if len(search_term) < 2:
+                return []
             return build_quick_paste_suggestions(search_term, searchable_families)
 
         def submit_quick_paste(selection):
@@ -1235,8 +1247,8 @@ with st.container(key="quick_paste_panel"):
             debounce=150,
             help="Type to see matches. Use Up/Down arrows and Enter to select (or press Tab to load). Quick jump: Press Ctrl+D after save.",
         )
-        # Setup Tab key to trigger paste loading for custom data
-        setup_tab_to_load()
+        # OPTIMIZATION #1: avoid repeated global Tab listeners on the page.
+        # Search only triggers when user actually loads/selects a value, not on every Tab key event.
     if group_mode:
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1338,9 +1350,11 @@ if not st.session_state.get("group_mode", False):
         st.warning("⚠️ **Please enter your staff name in the sidebar to begin data entry.**")
         st.stop()
     
-    # Install keyboard shortcuts (must be at top level so always active)
-    install_contribution_save_shortcut()
-    install_focus_paste_details_shortcut()
+    # OPTIMIZATION #6: attach shortcut handlers only once per session to avoid repeated JS injection.
+    if not st.session_state.get("shortcuts_installed"):
+        install_contribution_save_shortcut()
+        install_focus_paste_details_shortcut()
+        st.session_state["shortcuts_installed"] = True
     
     # Show save confirmation if present
     if "family_save_message" in st.session_state:
@@ -1681,7 +1695,9 @@ if contribution_data:
             st.session_state["focus_family_auto_save"] = False
             st.rerun()
         
-        install_contribution_save_shortcut()
-        install_focus_paste_details_shortcut()
+        if not st.session_state.get("shortcuts_installed"):
+            install_contribution_save_shortcut()
+            install_focus_paste_details_shortcut()
+            st.session_state["shortcuts_installed"] = True
         st.markdown('</div>', unsafe_allow_html=True)
 

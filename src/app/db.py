@@ -228,8 +228,13 @@ def get_family_by_husband_name(husband_name):
     return get_family(row["id"]) if row else None
 
 
+@st.cache_data(ttl=60)
 def search_families(search_text):
-    """Return active families whose Tamil/English name, alias, or phone matches."""
+    """Return active families whose Tamil/English name, alias, or phone matches.
+
+    Cached for a short window so repeated quick-lookups during collection do not pound the DB
+    on every rerun or keyboard event.
+    """
     search_text = search_text.strip()
     connection = get_connection()
     cursor = connection.cursor()
