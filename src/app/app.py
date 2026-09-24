@@ -3,6 +3,7 @@ import json
 import datetime
 import urllib.parse
 import urllib.request
+from decimal import Decimal, InvalidOperation
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -85,8 +86,14 @@ def render_contribution_form(denomination_col, selected_event, existing_family_i
             for denom, count in denomination_counts.items()
         )
         note_count_total = sum(denomination_counts.values())
-        denomination_matches = abs(float(contribution_amount) - float(denomination_total)) < 0.001
-        
+
+        try:
+            contribution_decimal = Decimal(str(contribution_amount)).quantize(Decimal("0.01"))
+            denomination_decimal = Decimal(str(denomination_total)).quantize(Decimal("0.01"))
+            denomination_matches = contribution_decimal == denomination_decimal
+        except (InvalidOperation, ValueError):
+            denomination_matches = False
+
         st.markdown('</div>', unsafe_allow_html=True)
         
         # Return values for parent scope to use
